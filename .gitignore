@@ -21,14 +21,14 @@ ENV/
 *.user
 
 # ── CLI AI tools ─────────────────────────────────────────────────────────────
-.claude/
-.gemini/
-.aider/
-.cursor/
-.continue/
-.codeium/
-.copilot/
-.github/copilot/
+.claude
+.gemini
+.aider
+.cursor
+.continue
+.codeium
+.copilot
+.github/copilot
 
 # ── Model weights ────────────────────────────────────────────────────────────
 *.h5

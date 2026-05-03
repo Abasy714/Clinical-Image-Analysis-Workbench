@@ -121,17 +121,3 @@ python main.py
 5. Use **File → Save** to export the current processed image.
 
 Draw a rectangular ROI directly on the image viewer to restrict histogram and statistics operations to that region.
-
----
-
-## Team
-
-| Name | Role |
-|------|------|
-| Mohamed Jameel Alabasy | Lead Developer |
-
----
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).

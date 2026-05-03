@@ -1,3 +1,4 @@
+# STATUS: IMPLEMENTED
 """
 Panel for synthetic noise injection and ROI-based statistical analysis.
 Allows the user to inject Gaussian or uniform noise and view local statistics of a drawn ROI.
@@ -25,3 +26,208 @@ Allows the user to inject Gaussian or uniform noise and view local statistics of
 # validate_grayscale(image)           # call before noise injection and before ROI stats
 # normalize_to_uint8(noisy)           # call on noise output before emitting noise_applied
 # @wrap_errors                        # decorate on_inject_clicked and update_roi_stats
+
+import numpy as np
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                              QComboBox, QDoubleSpinBox, QLabel, QFrame,
+                              QGridLayout, QSizePolicy)
+from PyQt6.QtCore import pyqtSignal, Qt, QRect
+from PyQt6.QtGui import QPainter, QColor, QPen
+
+from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
+                        ACCENT, TEXT, MUTED, MUTED2, btn_style)
+from utils import (validate_grayscale, normalize_to_uint8, wrap_errors,)
+
+
+class _HistCanvas(QWidget):
+    """Minimal histogram canvas reused within NoisePanel."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._histogram: np.ndarray | None = None
+        self.setFixedHeight(72)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setStyleSheet(f"background:{BG};border:1px solid {BORDER};border-radius:2px;")
+
+    def set_histogram(self, histogram: np.ndarray):
+        self._histogram = histogram
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(BG))
+        if self._histogram is None or len(self._histogram) == 0:
+            painter.setPen(QColor(MUTED2))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No ROI selected")
+            painter.end()
+            return
+        w, h = self.width(), self.height()
+        pad = 4
+        canvas_w, canvas_h = w - pad * 2, h - pad * 2
+        hist = self._histogram.astype(np.float64)
+        hist_max = float(hist.max()) or 1.0
+        n = len(hist)
+        accent = QColor(ACCENT)
+        pen = QPen(QColor(BORDER))
+        painter.setPen(pen)
+        painter.drawLine(pad, h - pad, w - pad, h - pad)
+        for i, val in enumerate(hist):
+            bar_h = int(val / hist_max * canvas_h)
+            x = pad + int(i / n * canvas_w)
+            bw = max(1, int(canvas_w / n))
+            accent.setAlpha(max(80, int(255 * val / hist_max)))
+            painter.fillRect(x, h - pad - bar_h, bw, bar_h, accent)
+        painter.end()
+
+
+class NoisePanel(QWidget):
+    noise_applied = pyqtSignal(str, np.ndarray)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._current_image: np.ndarray | None = None
+
+        self.setStyleSheet(f"background:{PANEL};")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        hdr = QLabel("NOISE INJECTION")
+        hdr.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;letter-spacing:.15em;")
+        layout.addWidget(hdr)
+
+        # noise type
+        type_lbl = QLabel("Noise type")
+        type_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        layout.addWidget(type_lbl)
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(["Gaussian", "Uniform"])
+        layout.addWidget(self._type_combo)
+
+        # Gaussian params
+        self._gauss_w = QWidget()
+        gl = QGridLayout(self._gauss_w)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(4)
+        gl.addWidget(QLabel("Mean", styleSheet=f"color:{MUTED};font-size:9px;"), 0, 0)
+        self._gauss_mean = QDoubleSpinBox()
+        self._gauss_mean.setRange(-128.0, 128.0)
+        self._gauss_mean.setValue(0.0)
+        gl.addWidget(self._gauss_mean, 0, 1)
+        gl.addWidget(QLabel("σ", styleSheet=f"color:{MUTED};font-size:9px;"), 1, 0)
+        self._gauss_sigma = QDoubleSpinBox()
+        self._gauss_sigma.setRange(0.1, 100.0)
+        self._gauss_sigma.setValue(25.0)
+        gl.addWidget(self._gauss_sigma, 1, 1)
+        layout.addWidget(self._gauss_w)
+
+        # Uniform params
+        self._uniform_w = QWidget()
+        ul = QGridLayout(self._uniform_w)
+        ul.setContentsMargins(0, 0, 0, 0)
+        ul.setSpacing(4)
+        ul.addWidget(QLabel("Low", styleSheet=f"color:{MUTED};font-size:9px;"), 0, 0)
+        self._uniform_low = QDoubleSpinBox()
+        self._uniform_low.setRange(-255.0, 0.0)
+        self._uniform_low.setValue(-30.0)
+        ul.addWidget(self._uniform_low, 0, 1)
+        ul.addWidget(QLabel("High", styleSheet=f"color:{MUTED};font-size:9px;"), 1, 0)
+        self._uniform_high = QDoubleSpinBox()
+        self._uniform_high.setRange(0.0, 255.0)
+        self._uniform_high.setValue(30.0)
+        ul.addWidget(self._uniform_high, 1, 1)
+        self._uniform_w.hide()
+        layout.addWidget(self._uniform_w)
+
+        # inject button
+        self.inject_btn = QPushButton("Inject Noise")
+        self.inject_btn.setStyleSheet(btn_style('primary'))
+        layout.addWidget(self.inject_btn)
+
+        self._type_combo.currentTextChanged.connect(self._on_type_changed)
+
+        # divider
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setStyleSheet(f"background:{BORDER};max-height:1px;")
+        layout.addWidget(div)
+
+        # ROI stats
+        roi_lbl = QLabel("ROI STATISTICS")
+        roi_lbl.setStyleSheet(f"color:{MUTED};font-size:8px;font-weight:bold;letter-spacing:.12em;")
+        layout.addWidget(roi_lbl)
+
+        self._hist_canvas = _HistCanvas()
+        layout.addWidget(self._hist_canvas)
+
+        stats_w = QWidget()
+        stats_w.setStyleSheet(f"background:{INPUT};border-radius:2px;")
+        sg = QGridLayout(stats_w)
+        sg.setContentsMargins(8, 6, 8, 6)
+        sg.setSpacing(4)
+
+        self._stat_labels: dict = {}
+        for row, (key, display) in enumerate([
+            ("mean", "Mean"), ("var", "Variance"),
+            ("min", "Min"), ("max", "Max"), ("count", "Pixels")
+        ]):
+            sg.addWidget(QLabel(display, styleSheet=f"color:{MUTED};font-size:9px;"), row, 0)
+            v = QLabel("—")
+            v.setStyleSheet(f"color:{TEXT};font-size:9px;font-weight:bold;")
+            v.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            sg.addWidget(v, row, 1)
+            self._stat_labels[key] = v
+        layout.addWidget(stats_w)
+
+        hint = QLabel("Draw an ROI on the image\nto compute local statistics")
+        hint.setStyleSheet(f"color:{MUTED2};font-size:9px;")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(hint)
+
+        layout.addStretch()
+
+    def set_image(self, image: np.ndarray):
+        self._current_image = image
+
+    def _on_type_changed(self, name: str):
+        self._gauss_w.setVisible(name == "Gaussian")
+        self._uniform_w.setVisible(name == "Uniform")
+
+    @wrap_errors
+    def on_inject_clicked(self):
+        if self._current_image is None:
+            return
+        validate_grayscale(self._current_image)
+        noise_type = self._type_combo.currentText()
+
+        if noise_type == "Gaussian":
+            from processing.noise.noise_injection import add_gaussian_noise
+            mean = self._gauss_mean.value()
+            sigma = self._gauss_sigma.value()
+            result = add_gaussian_noise(self._current_image, mean, sigma)
+            op_name = f"Gaussian Noise μ={mean:.0f} σ={sigma:.0f}"
+        else:
+            from processing.noise.noise_injection import add_uniform_noise
+            low = self._uniform_low.value()
+            high = self._uniform_high.value()
+            result = add_uniform_noise(self._current_image, low, high)
+            op_name = f"Uniform Noise [{low:.0f},{high:.0f}]"
+
+        result = normalize_to_uint8(result)
+        self.noise_applied.emit(op_name, result)
+
+    @wrap_errors
+    def update_roi_stats(self, image: np.ndarray, roi: QRect):
+        validate_grayscale(image)
+        from processing.noise.roi_stats import compute_roi_stats, extract_roi
+        from processing.histogram.histogram_utils import compute_histogram
+        roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
+        if roi_pixels.size == 0:
+            return
+        hist = compute_histogram(roi_pixels)
+        self._hist_canvas.set_histogram(hist)
+        self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
+        self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
+        self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
+        self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
+        self._stat_labels["count"].setText(f"{roi_pixels.size}")
