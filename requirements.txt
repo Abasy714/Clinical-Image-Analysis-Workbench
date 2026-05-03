@@ -1,0 +1,8 @@
+pyqt6
+numpy
+pydicom
+Pillow
+matplotlib
+scipy
+tensorflow
+keras
