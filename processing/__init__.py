@@ -10,3 +10,4 @@ from .spatial import (
     median_filter,
 )
 from .interpolation import nearest_neighbor_resize, bilinear_resize, bilinear_sample, apply_zoom
+from .geometric import rotate_image, shear_image

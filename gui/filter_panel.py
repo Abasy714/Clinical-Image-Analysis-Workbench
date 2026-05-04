@@ -38,6 +38,25 @@ class FilterWorker(QThread):
             self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
+class GeometricWorker(QThread):
+    """Runs a geometric transform in a background thread."""
+    finished = pyqtSignal(str, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, fn, op_name: str, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._op_name = op_name
+
+    def run(self):
+        try:
+            result = self._fn()
+            self.finished.emit(self._op_name, result)
+        except Exception as e:
+            import traceback
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
+
+
 class FilterPanel(QWidget):
     filter_applied = pyqtSignal(str, np.ndarray)
 
@@ -129,11 +148,71 @@ class FilterPanel(QWidget):
         self.apply_btn.setStyleSheet(APPLY_BTN_SS)
         layout.addWidget(self.apply_btn)
 
+        # separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color:{BORDER};")
+        layout.addWidget(sep)
+
+        # geometric header
+        geo_hdr = QLabel("GEOMETRIC TRANSFORM")
+        geo_hdr.setStyleSheet(HEADER_SS)
+        layout.addWidget(geo_hdr)
+
+        # rotation row
+        rot_row = QWidget()
+        rrl = QHBoxLayout(rot_row)
+        rrl.setContentsMargins(0, 0, 0, 0)
+        rrl.setSpacing(6)
+        angle_lbl = QLabel("Angle °")
+        angle_lbl.setStyleSheet(FIELD_SS)
+        rrl.addWidget(angle_lbl)
+        self._angle_spin = QDoubleSpinBox()
+        self._angle_spin.setRange(-360.0, 360.0)
+        self._angle_spin.setValue(45.0)
+        self._angle_spin.setSingleStep(1.0)
+        self._angle_spin.setStyleSheet(SPINBOX_SS)
+        rrl.addWidget(self._angle_spin)
+        self._rotate_btn = QPushButton("Rotate")
+        self._rotate_btn.setStyleSheet(APPLY_BTN_SS)
+        rrl.addWidget(self._rotate_btn)
+        layout.addWidget(rot_row)
+
+        # shear row
+        shear_row = QWidget()
+        shl = QHBoxLayout(shear_row)
+        shl.setContentsMargins(0, 0, 0, 0)
+        shl.setSpacing(6)
+        sx_lbl = QLabel("Sx")
+        sx_lbl.setStyleSheet(FIELD_SS)
+        shl.addWidget(sx_lbl)
+        self._shear_x_spin = QDoubleSpinBox()
+        self._shear_x_spin.setRange(-2.0, 2.0)
+        self._shear_x_spin.setValue(0.3)
+        self._shear_x_spin.setSingleStep(0.05)
+        self._shear_x_spin.setStyleSheet(SPINBOX_SS)
+        shl.addWidget(self._shear_x_spin)
+        sy_lbl = QLabel("Sy")
+        sy_lbl.setStyleSheet(FIELD_SS)
+        shl.addWidget(sy_lbl)
+        self._shear_y_spin = QDoubleSpinBox()
+        self._shear_y_spin.setRange(-2.0, 2.0)
+        self._shear_y_spin.setValue(0.0)
+        self._shear_y_spin.setSingleStep(0.05)
+        self._shear_y_spin.setStyleSheet(SPINBOX_SS)
+        shl.addWidget(self._shear_y_spin)
+        self._shear_btn = QPushButton("Shear")
+        self._shear_btn.setStyleSheet(APPLY_BTN_SS)
+        shl.addWidget(self._shear_btn)
+        layout.addWidget(shear_row)
+
         layout.addStretch()
 
         # connect
         self._filter_combo.currentTextChanged.connect(self._on_filter_changed)
         self._sigma_spin.valueChanged.connect(self._update_kernel_preview)
+        self._rotate_btn.clicked.connect(self._apply_rotation)
+        self._shear_btn.clicked.connect(self._apply_shearing)
         self._on_filter_changed("Average")
 
     # ------------------------------------------------------------------ slots
@@ -401,6 +480,42 @@ class FilterPanel(QWidget):
         import logging
         logging.getLogger('ciaw').error(f"Filter worker error: {error_msg}")
         show_error_dialog("Filter Error", error_msg)
+
+    def _apply_rotation(self):
+        if self._current_image is None:
+            return
+        _image = self._current_image.copy()
+        _angle = self._angle_spin.value()
+        def _fn():
+            from processing.geometric import rotate_image
+            return rotate_image(_image, _angle)
+        self._geo_worker = GeometricWorker(_fn, f"Rotate {_angle:.1f}°", parent=self)
+        self._geo_worker.finished.connect(self._on_geo_finished)
+        self._geo_worker.error.connect(self._on_geo_error)
+        self._geo_worker.start()
+
+    def _apply_shearing(self):
+        if self._current_image is None:
+            return
+        _image = self._current_image.copy()
+        _sx = self._shear_x_spin.value()
+        _sy = self._shear_y_spin.value()
+        def _fn():
+            from processing.geometric import shear_image
+            return shear_image(_image, _sx, _sy)
+        self._geo_worker = GeometricWorker(_fn, f"Shear Sx={_sx:.2f} Sy={_sy:.2f}", parent=self)
+        self._geo_worker.finished.connect(self._on_geo_finished)
+        self._geo_worker.error.connect(self._on_geo_error)
+        self._geo_worker.start()
+
+    def _on_geo_finished(self, op_name: str, result):
+        if result is not None and isinstance(result, np.ndarray):
+            self.filter_applied.emit(op_name, result)
+
+    def _on_geo_error(self, error_msg: str):
+        import logging
+        logging.getLogger('ciaw').error(f"Geometric worker error: {error_msg}")
+        show_error_dialog("Geometric Transform Error", error_msg)
 
     @wrap_errors
     def open_kernel_modal(self, image: np.ndarray):
