@@ -212,7 +212,7 @@ class ImageViewer(QWidget):
 
         # ---- scroll area ----
         self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
+        self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._scroll.setStyleSheet(f"QScrollArea{{background:{BG};border:none;}}")
         self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -222,7 +222,7 @@ class ImageViewer(QWidget):
         self._img_label.setStyleSheet(f"background:{BG};color:{MUTED};font-size:11px;")
         self._img_label.setText("No image loaded")
         self._img_label.setMinimumSize(1, 1)
-        self._img_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._img_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._scroll.setWidget(self._img_label)
         layout.addWidget(self._scroll)
 
@@ -268,20 +268,7 @@ class ImageViewer(QWidget):
             img = np.mean(img, axis=2).astype(np.uint8)
         self._image = normalize_to_uint8(img)
 
-        MAX_DISPLAY = 1024
-        h, w = self._image.shape
-        if h > MAX_DISPLAY or w > MAX_DISPLAY:
-            scale = MAX_DISPLAY / max(h, w)
-            disp_h = max(1, int(h * scale))
-            disp_w = max(1, int(w * scale))
-            try:
-                from processing.interpolation import nearest_neighbor_resize
-                resized = nearest_neighbor_resize(self._image, disp_h, disp_w)
-                self._display_image = resized if resized is not None else self._image
-            except Exception:
-                self._display_image = self._image
-        else:
-            self._display_image = self._image
+        self._display_image = self._image
 
         # Reset before/after state to "after"
         self._showing_before = False
@@ -289,8 +276,8 @@ class ImageViewer(QWidget):
         self._before_btn.setChecked(False)
         self._before_badge.hide()
 
-        # Always render synchronously so image appears immediately
-        self._render_sync()
+        # Render with the current zoom; zoom is display-only and never mutates _image.
+        self._render()
 
     def set_before_image(self, image: np.ndarray):
         """Store the before/original image for before-after comparison."""
@@ -308,16 +295,13 @@ class ImageViewer(QWidget):
         self._before_image = img
 
     def zoom_in(self):
-        self._zoom = min(self._zoom + 10, 800)
-        self._render()
+        self._set_zoom(self._zoom + 10)
 
     def zoom_out(self):
-        self._zoom = max(self._zoom - 10, 25)
-        self._render()
+        self._set_zoom(self._zoom - 10)
 
     def zoom_fit(self):
-        self._zoom = 100
-        self._render()
+        self._set_zoom(100)
 
     def set_interpolation_mode(self, mode: str):
         if mode in ('nearest', 'bilinear'):
@@ -390,13 +374,14 @@ class ImageViewer(QWidget):
 
     def _render_sync(self):
         """Synchronous render — always shows image immediately on the main thread."""
-        if self._image is None:
+        base = self._get_display_base()
+        if base is None:
             return
-        display = self._display_image if self._display_image is not None else self._image
-        self._display_array(display)
+        self._display_array(base)
 
     def _render(self):
-        if self._image is None or self._display_image is None:
+        base = self._get_display_base()
+        if base is None:
             return
 
         if self._zoom == 100:
@@ -404,10 +389,10 @@ class ImageViewer(QWidget):
             return
 
         zoom_factor = self._zoom / 100.0
-        h, w = self._display_image.shape[:2]
+        h, w = base.shape[:2]
         new_h = max(1, int(round(h * zoom_factor)))
         new_w = max(1, int(round(w * zoom_factor)))
-        _img = self._display_image.copy()
+        _img = base.copy()
         _mode = self._interp_mode
 
         def _zoom_fn():
@@ -426,8 +411,12 @@ class ImageViewer(QWidget):
                     return ((result.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
                 return np.zeros((new_h, new_w), dtype=np.uint8)
 
+        requested_zoom = self._zoom
         self._zoom_worker = ZoomWorker(_zoom_fn, parent=self)
-        self._zoom_worker.finished.connect(self._display_array)
+        self._zoom_worker.finished.connect(
+            lambda result, zoom=requested_zoom: self._display_array(result)
+            if zoom == self._zoom else None
+        )
         self._zoom_worker.error.connect(
             lambda e: logging.getLogger('ciaw').error(f"Zoom error: {e}")
         )
@@ -441,15 +430,10 @@ class ImageViewer(QWidget):
         pixmap = to_qpixmap(data)
         if pixmap.isNull():
             return
-        label_size = self._img_label.size()
-        if label_size.width() > 10 and label_size.height() > 10:
-            pixmap = pixmap.scaled(
-                label_size,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation
-            )
         self._img_label.setPixmap(pixmap)
         self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img_label.setFixedSize(pixmap.size())
+        self._img_label.updateGeometry()
         self._zoom_label.setText(f"{self._zoom}%")
         self.zoom_changed.emit(self._zoom)
 
@@ -461,7 +445,7 @@ class ImageViewer(QWidget):
             self._showing_before = True
             self._after_btn.setChecked(False)
             self._before_btn.setChecked(True)
-            self._display_array(self._before_image)
+            self._render()
             self._before_badge.show()
             self._before_badge.raise_()
         else:
@@ -470,16 +454,24 @@ class ImageViewer(QWidget):
             self._before_btn.setChecked(False)
             self._before_badge.hide()
             if self._image is not None:
-                self._render_sync()
+                self._render()
+
+    def _set_zoom(self, zoom_percent: int):
+        self._zoom = max(10, min(int(zoom_percent), 1000))
+        self._render()
+
+    def _get_display_base(self) -> np.ndarray | None:
+        if self._showing_before and self._before_image is not None:
+            return self._before_image
+        return self._display_image if self._display_image is not None else self._image
 
     def _viewport_to_image(self, point: QPoint) -> tuple:
         if self._image is None:
             return 0, 0
-        hscroll = self._scroll.horizontalScrollBar().value()
-        vscroll = self._scroll.verticalScrollBar().value()
+        label_pos = self._img_label.mapFrom(self._scroll.viewport(), point)
         zoom_factor = self._zoom / 100.0
-        ix = int((point.x() + hscroll) / zoom_factor)
-        iy = int((point.y() + vscroll) / zoom_factor)
+        ix = int(label_pos.x() / zoom_factor)
+        iy = int(label_pos.y() / zoom_factor)
         h, w = self._image.shape[:2]
         return max(0, min(ix, w - 1)), max(0, min(iy, h - 1))
 
