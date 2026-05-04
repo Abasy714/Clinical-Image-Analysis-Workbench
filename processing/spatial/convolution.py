@@ -1,24 +1,84 @@
 ﻿"""
 2D convolution implemented entirely from scratch using nested loops and numpy.
-This is the core engine used by all spatial filters and the Harris corner detector.
+This is the core engine used by all spatial filters.
 """
 
-# numpy — array operations, padding, kernel application
+import numpy as np
+from utils.error_handler import wrap_errors
 
-# CONSTANTS
-# PADDING_MODES = ['zero', 'reflect', 'replicate']
+PADDING_MODES = ['zero', 'reflect', 'replicate']
 
-# FUNCTIONS
-# def convolve2d(image: np.ndarray, kernel: np.ndarray, padding: str = 'zero') -> np.ndarray:
-#   — pad image -> slide kernel over every pixel -> accumulate weighted sum -> return result
-#   — must handle both odd and even kernel sizes
-# def _pad_image(image: np.ndarray, pad_h: int, pad_w: int, mode: str) -> np.ndarray:
-#   — apply zero / reflect / replicate padding based on mode
 
-# --- UTIL USAGE GUIDE ---
-# from utils.error_handler import wrap_errors
-#
-# @wrap_errors                        # decorate convolve2d — mismatched kernel/image shapes will crash
-# Note: convolve2d returns float64 — callers must call normalize_to_uint8 on the result
-# Note: no other utils needed — this is a pure math function, keep dependencies minimal
-# Note: this function is called by smoothing.py, edge_detection.py, and harris_detector.py
+def _pad_image(image: np.ndarray, pad_h: int, pad_w: int, mode: str) -> np.ndarray:
+    """
+    Pad a 2D image array on all sides.
+
+    Parameters
+    ----------
+    image   : 2D float64 array (H, W)
+    pad_h   : number of rows to add on each of top and bottom
+    pad_w   : number of cols to add on each of left and right
+    mode    : 'zero' | 'reflect' | 'replicate'
+
+    Returns
+    -------
+    padded  : 2D float64 array (H + 2*pad_h, W + 2*pad_w)
+    """
+    if mode == 'zero':
+        return np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant', constant_values=0)
+
+    if mode == 'reflect':
+        return np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode='reflect')
+
+    if mode == 'replicate':
+        return np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode='edge')
+
+    raise ValueError(f"Unknown padding mode '{mode}'. Choose from {PADDING_MODES}.")
+
+
+@wrap_errors
+def convolve2d(image: np.ndarray, kernel: np.ndarray,
+               padding: str = 'zero') -> np.ndarray:
+    """
+    Apply a 2D convolution kernel to a grayscale image from scratch.
+
+    The kernel is flipped (true convolution, not correlation) before sliding.
+    Works for any odd or even kernel size.
+
+    Parameters
+    ----------
+    image   : 2D numpy array (H, W), any numeric dtype
+    kernel  : 2D numpy array (kH, kW), the convolution kernel
+    padding : padding strategy — 'zero' (default), 'replicate', or 'reflect'
+
+    Returns
+    -------
+    output  : 2D float64 array (H, W), same spatial size as input
+    """
+    if image.ndim != 2:
+        raise ValueError(f"convolve2d expects a 2D image, got shape {image.shape}")
+    if kernel.ndim != 2:
+        raise ValueError(f"convolve2d expects a 2D kernel, got shape {kernel.shape}")
+
+    image = image.astype(np.float64)
+    kernel = kernel.astype(np.float64)
+
+    # true convolution = correlation with flipped kernel
+    kernel_flipped = np.flip(kernel)
+
+    img_h, img_w = image.shape
+    k_h, k_w = kernel_flipped.shape
+
+    pad_h = k_h // 2
+    pad_w = k_w // 2
+
+    padded = _pad_image(image, pad_h, pad_w, padding)
+    output = np.zeros((img_h, img_w), dtype=np.float64)
+
+    # slide kernel over every output pixel
+    for row in range(img_h):
+        for col in range(img_w):
+            region = padded[row: row + k_h, col: col + k_w]
+            output[row, col] = np.sum(region * kernel_flipped)
+
+    return output

@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
 
         save_act = QAction("Save…", self)
         save_act.setShortcut("Ctrl+S")
-        save_act.triggered.connect(self.save_image)
+        save_act.triggered.connect(lambda: self.save_image())
         file_menu.addAction(save_act)
 
         file_menu.addSeparator()
