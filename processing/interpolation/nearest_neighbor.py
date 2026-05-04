@@ -4,6 +4,7 @@ Maps each output pixel to the closest input pixel using floor rounding.
 """
 
 # numpy — array operations for coordinate mapping and pixel assignment
+#formula: input position = output position × (input size / output size)
 
 import numpy as np
 from utils.error_handler import wrap_errors
@@ -17,15 +18,14 @@ def nearest_neighbor_resize(image: np.ndarray, new_h: int, new_w: int) -> np.nda
     src_h, src_w = image.shape[:2]
 
     #scaling factors
-    scale_y = src_h / new_h
-    scale_x = src_w / new_w
+    scale_y = src_h / new_h     #input size / output size  (for rows)
+    scale_x = src_w / new_w     #(for columns)
     
-    #creates an array [0, 1, 2, ..., new_h-1] representing every row index in the output image
-    out_row_idx = np.arange(new_h)     
-    out_col_idx = np.arange(new_w)
+    out_row_idx = np.arange(new_h)    # output position (0, 1, 2, ... new_h-1)
+    out_col_idx = np.arange(new_w)    # output position (0, 1, 2, ... new_w-1)
 
     #maps each output row to its corresponding source row. np.floor rounds down to the nearest integer,
-    # which effectively implements the nearest neighbor logic by selecting the pixel from the input image that is closest to the calculated position
+    #output position × ratio = input position
     src_row_idx = np.floor(out_row_idx * scale_y).astype(np.int32)
     src_col_idx = np.floor(out_col_idx * scale_x).astype(np.int32)
 
