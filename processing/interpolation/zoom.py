@@ -10,6 +10,7 @@ Maintains the zoom factor and selected interpolation mode.
 import numpy as np
 from utils.error_handler import wrap_errors
 from processing.interpolation.nearest_neighbor import nearest_neighbor_resize
+from processing.interpolation.bilinear import bilinear_resize
 
 INTERPOLATION_MODES = ['nearest', 'bilinear']
 
@@ -37,5 +38,12 @@ def apply_zoom(image: np.ndarray, zoom_factor: float, mode: str) -> np.ndarray:
     if mode == 'nearest':
         return nearest_neighbor_resize(image, new_h, new_w)
     else:
-        from processing.interpolation.bilinear import bilinear_resize
+        # Handle grayscale vs RGB images for bilinear interpolation
+        if image.ndim == 2:
+            return bilinear_resize(image, new_h, new_w)
+        if image.ndim == 3 and image.shape[2] == 3:
+            output = np.empty((new_h, new_w, image.shape[2]), dtype=np.uint8)
+            for c in range(image.shape[2]):
+                output[:, :, c] = bilinear_resize(image[:, :, c], new_h, new_w)
+            return output
         return bilinear_resize(image, new_h, new_w)
