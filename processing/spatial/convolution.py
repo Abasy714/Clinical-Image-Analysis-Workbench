@@ -38,7 +38,7 @@ def _pad_image(image: np.ndarray, pad_h: int, pad_w: int, mode: str) -> np.ndarr
 
 @wrap_errors
 def convolve2d(image: np.ndarray, kernel: np.ndarray,
-               padding: str = 'replicate') -> np.ndarray:
+               padding: str = 'zero') -> np.ndarray:
     """
     Apply a 2D convolution kernel to a grayscale image from scratch.
 
@@ -49,7 +49,7 @@ def convolve2d(image: np.ndarray, kernel: np.ndarray,
     ----------
     image   : 2D numpy array (H, W), any numeric dtype
     kernel  : 2D numpy array (kH, kW), the convolution kernel
-    padding : padding strategy — 'replicate' (default), 'zero', or 'reflect'
+    padding : padding strategy — 'zero' (default), 'replicate', or 'reflect'
 
     Returns
     -------
