@@ -14,7 +14,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, APPLY_BTN_SS)
-from utils import (validate_grayscale, normalize_to_uint8, wrap_errors,)
+from utils import (validate_grayscale, normalize_to_uint8, wrap_errors, show_error_dialog,)
 
 
 class HistogramCanvas(QWidget):
@@ -157,10 +157,13 @@ class HistogramPanel(QWidget):
             if btn.isChecked():
                 bsz = btn.property("bsz")
                 break
-        from processing.histogram.local_equalization import local_histogram_equalization
-        result = local_histogram_equalization(image, bsz)
-        result = normalize_to_uint8(result)
-        self.equalization_applied.emit(f"Local EQ {bsz}×{bsz}", result)
+        try:
+            from processing.histogram.local_equalization import local_histogram_equalization
+            result = local_histogram_equalization(image, bsz)
+            result = normalize_to_uint8(result)
+            self.equalization_applied.emit(f"Local EQ {bsz}×{bsz}", result)
+        except (ImportError, NotImplementedError, Exception) as e:
+            show_error_dialog("Not Implemented", f"Local histogram equalization is not yet available.\n{e}")
 
     @wrap_errors
     def update_roi(self, image: np.ndarray, roi: QRect):

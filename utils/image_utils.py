@@ -29,8 +29,12 @@ def normalize_to_uint8(image: np.ndarray) -> np.ndarray:
     if image.dtype == np.uint8:
         return image
     if np.issubdtype(image.dtype, np.floating):
-        clipped = np.clip(image, 0.0, 1.0)
-        return (clipped * 255).astype(np.uint8)
+        mn, mx = float(image.min()), float(image.max())
+        if mx == mn:
+            return np.zeros_like(image, dtype=np.uint8)
+        if mn >= 0.0 and mx <= 1.0:
+            return (image * 255).astype(np.uint8)
+        return ((image - mn) / (mx - mn) * 255).astype(np.uint8)
     if image.dtype == np.uint16:
         return (image.astype(np.float64) / 65535.0 * 255).astype(np.uint8)
     if image.dtype == np.uint32:

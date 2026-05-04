@@ -187,6 +187,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
 
+        self._right_tabs = right_tabs
         vl.addWidget(splitter, stretch=1)
 
     def _make_title_bar(self) -> QWidget:
@@ -296,18 +297,23 @@ class MainWindow(QMainWindow):
             lambda z: self._sb_zoom.setText(f"{z}%")
         )
 
+        # tab change — compute spectrum only when Freq tab is selected
+        self._right_tabs.currentChanged.connect(self._on_tab_changed)
+
     # ------------------------------------------------------------------ actions
 
     @wrap_errors
     def load_image(self, filepath: str = None):
         if filepath is None:
+            import os
+            images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
             filepath, _ = QFileDialog.getOpenFileName(
-                self, "Open Image", "",
+                self, "Open Image", images_dir,
                 "Medical Images (*.dcm *.jpg *.jpeg *.bmp);;All Files (*)"
             )
         if not filepath:
             return
-        from processing.io.image_loader import load_image
+        from processing.io import load_image
         image, metadata = load_image(filepath)
         if image is None:
             show_error_dialog("Load failed", f"Could not load: {filepath}")
@@ -316,9 +322,12 @@ class MainWindow(QMainWindow):
         self._image_viewer.set_image(image)
         self._metadata_panel.update_metadata(metadata)
         self._pipeline_panel.refresh_stack()
-        self._fourier_panel.set_image(image)
+        self._pipeline_panel.update_checkpoints()
+        # Phase 2 only — frequency domain disabled in Phase 1
+        # self._fourier_panel.set_image(image)
         self._morph_panel.set_image(image)
         self._noise_panel.set_image(image)
+        self._filter_panel.set_current_image(image)
         h, w = image.shape[:2]
         self._sb_dim.setText(f"{w}×{h}")
         self._sb_op.setText("OP: load")
@@ -333,7 +342,7 @@ class MainWindow(QMainWindow):
         )
         if not filepath:
             return
-        from processing.io.image_saver import save_image
+        from processing.io import save_image
         save_image(self.pipeline.current(), filepath)
         self.logger.info("Saved image: %s", filepath)
 
@@ -341,8 +350,12 @@ class MainWindow(QMainWindow):
         self.pipeline.push(op_name, result)
         self._image_viewer.set_image(result)
         self._pipeline_panel.refresh_stack()
+        self._pipeline_panel.update_checkpoints()
         self._morph_panel.set_image(result)
         self._noise_panel.set_image(result)
+        # Phase 2 only — frequency domain disabled in Phase 1
+        # self._fourier_panel.set_image(result)
+        self._filter_panel.set_current_image(result)
 
         stack_depth = len(self.pipeline.get_stack_names())
         self._sb_op.setText(f"OP: {op_name[:18]}")
@@ -410,6 +423,20 @@ class MainWindow(QMainWindow):
             self._image_viewer.set_image(image)
             self._pipeline_panel.refresh_stack()
             self._pipeline_panel.update_checkpoints()
+
+    def _on_tab_changed(self, index: int):
+        tab_text = self._right_tabs.tabText(index).strip().upper()
+        if tab_text == "FREQ":
+            image = self.pipeline.current()
+            if image is not None:
+                try:
+                    from processing.frequency.spectrum import compute_spectrum  # noqa: F401
+                    self._fourier_panel.set_image(image)
+                except ImportError:
+                    # Phase 2 not implemented yet — no dialog
+                    pass
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------ stylesheet
 

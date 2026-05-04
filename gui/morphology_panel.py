@@ -197,33 +197,35 @@ class MorphologyPanel(QWidget):
         from processing.morphology.structuring_element import get_square_se
         return get_square_se(size)
 
-    @wrap_errors
     def _apply_op(self, op_name: str):
         if self._binary_image is None:
             show_error_dialog("No image", "Load and threshold an image first.")
             return
-        se = self._get_se()
+        try:
+            se = self._get_se()
 
-        if op_name == "Erode":
-            from processing.morphology.erosion_dilation import erode
-            result = erode(self._binary_image, se)
-        elif op_name == "Dilate":
-            from processing.morphology.erosion_dilation import dilate
-            result = dilate(self._binary_image, se)
-        elif op_name == "Open":
-            from processing.morphology.opening_closing import opening
-            result = opening(self._binary_image, se)
-        elif op_name == "Close":
-            from processing.morphology.opening_closing import closing
-            result = closing(self._binary_image, se)
-        elif op_name == "Boundary":
-            from processing.morphology.boundary_extraction import extract_boundary
-            result = extract_boundary(self._binary_image, se)
-        else:
-            return
+            if op_name == "Erode":
+                from processing.morphology.erosion_dilation import erode
+                result = erode(self._binary_image, se)
+            elif op_name == "Dilate":
+                from processing.morphology.erosion_dilation import dilate
+                result = dilate(self._binary_image, se)
+            elif op_name == "Open":
+                from processing.morphology.opening_closing import opening
+                result = opening(self._binary_image, se)
+            elif op_name == "Close":
+                from processing.morphology.opening_closing import closing
+                result = closing(self._binary_image, se)
+            elif op_name == "Boundary":
+                from processing.morphology.boundary_extraction import extract_boundary
+                result = extract_boundary(self._binary_image, se)
+            else:
+                return
 
-        result = normalize_to_uint8(result * 255)
-        self.morphology_applied.emit(op_name, result)
+            result = normalize_to_uint8(result * 255)
+            self.morphology_applied.emit(op_name, result)
+        except (ImportError, NotImplementedError, Exception) as e:
+            show_error_dialog("Morphology Error", f"Operation '{op_name}' failed.\n{e}")
 
 
 def _hdiv() -> QFrame:

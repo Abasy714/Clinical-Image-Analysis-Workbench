@@ -1,4 +1,4 @@
-# STATUS: IMPLEMENTED
+# STATUS: SPATIAL DOMAIN WIRED
 """
 Control panel for spatial filtering operations.
 Allows the user to select kernel size and apply average, Gaussian, Sobel/Prewitt, or median filters.
@@ -24,6 +24,7 @@ class FilterPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._current_image: np.ndarray | None = None
         self.setStyleSheet(f"background:{PANEL};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -67,10 +68,12 @@ class FilterPanel(QWidget):
         output_lbl.setStyleSheet(FIELD_SS)
         er.addWidget(output_lbl)
         self._edge_group = QButtonGroup(self)
+        self._edge_btns: dict = {}
         for label in ("H", "V", "Mag"):
             rb = QRadioButton(label)
             rb.setStyleSheet(f"color:{TEXT};font-size:9px;")
             self._edge_group.addButton(rb)
+            self._edge_btns[label] = rb
             er.addWidget(rb)
         self._edge_group.buttons()[2].setChecked(True)
         self._edge_row.hide()
@@ -196,6 +199,13 @@ class FilterPanel(QWidget):
     def _open_kernel_modal(self):
         pass  # main_window.py handles modal opening via kernel_btn.clicked signal
 
+    def set_current_image(self, image: np.ndarray):
+        self._current_image = image
+
+    def _get_edge_output(self) -> str:
+        checked = self._edge_group.checkedButton()
+        return checked.text() if checked else "Mag"
+
     def _build_kernel_cell(self, value: float, max_val: float) -> QLabel:
         cell = QLabel(f"{value:.3f}")
         cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -303,44 +313,44 @@ class FilterPanel(QWidget):
             return self._custom_ksz
         return self._current_kernel_size
 
-    @wrap_errors
     def on_apply_clicked(self, image: np.ndarray):
-        validate_grayscale(image)
-        ft = self._filter_combo.currentText()
-        sz = self._get_current_kernel_size()
-        sigma = self._sigma_spin.value()
+        try:
+            validate_grayscale(image)
+            ft = self._filter_combo.currentText()
+            sz = self._get_current_kernel_size()
+            sigma = self._sigma_spin.value()
 
-        if ft == "Average":
-            from processing.spatial.smoothing import average_filter
-            result = average_filter(image, sz)
-            op_name = f"Average {sz}×{sz}"
-        elif ft == "Gaussian":
-            from processing.spatial.smoothing import gaussian_filter
-            result = gaussian_filter(image, sz, sigma)
-            op_name = f"Gaussian {sz}×{sz} σ={sigma:.1f}"
-        elif ft == "Sobel":
-            from processing.spatial.edge_detection import sobel
-            gx, gy, mag = sobel(image)
-            checked = self._edge_group.checkedButton()
-            label = checked.text() if checked else "Mag"
-            result = {"H": gx, "V": gy, "Mag": mag}.get(label, mag)
-            op_name = f"Sobel-{label}"
-        elif ft == "Prewitt":
-            from processing.spatial.edge_detection import prewitt
-            gx, gy, mag = prewitt(image)
-            checked = self._edge_group.checkedButton()
-            label = checked.text() if checked else "Mag"
-            result = {"H": gx, "V": gy, "Mag": mag}.get(label, mag)
-            op_name = f"Prewitt-{label}"
-        elif ft == "Median":
-            from processing.spatial.median_filter import median_filter
-            result = median_filter(image, sz)
-            op_name = f"Median {sz}×{sz}"
-        else:
-            return
+            if ft == "Average":
+                from processing.spatial import average_filter
+                result = average_filter(image, sz)
+                op_name = f"Average {sz}×{sz}"
+            elif ft == "Gaussian":
+                from processing.spatial import gaussian_filter
+                result = gaussian_filter(image, sz, sigma)
+                op_name = f"Gaussian {sz}×{sz} σ={sigma:.1f}"
+            elif ft == "Sobel":
+                from processing.spatial import sobel
+                gx, gy, mag = sobel(image)
+                label = self._get_edge_output()
+                result = {"H": gx, "V": gy, "Mag": mag}.get(label, mag)
+                op_name = f"Sobel-{label}"
+            elif ft == "Prewitt":
+                from processing.spatial import prewitt
+                gx, gy, mag = prewitt(image)
+                label = self._get_edge_output()
+                result = {"H": gx, "V": gy, "Mag": mag}.get(label, mag)
+                op_name = f"Prewitt-{label}"
+            elif ft == "Median":
+                from processing.spatial import median_filter
+                result = median_filter(image, sz)
+                op_name = f"Median {sz}×{sz}"
+            else:
+                return
 
-        result = normalize_to_uint8(result)
-        self.filter_applied.emit(op_name, result)
+            result = normalize_to_uint8(result)
+            self.filter_applied.emit(op_name, result)
+        except Exception as e:
+            show_error_dialog("Filter Error", str(e))
 
     @wrap_errors
     def open_kernel_modal(self, image: np.ndarray):
@@ -348,7 +358,7 @@ class FilterPanel(QWidget):
         dlg = KernelEditorDialog(sigma=self._sigma_spin.value(), parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             kernel = dlg.get_kernel()
-            from processing.spatial.convolution import convolve2d
+            from processing.spatial import convolve2d
             raw = convolve2d(image.astype(np.float64), kernel)
             result = normalize_to_uint8(raw)
             self.filter_applied.emit(f"Custom {kernel.shape[0]}×{kernel.shape[1]}", result)

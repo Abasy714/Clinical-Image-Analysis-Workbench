@@ -14,7 +14,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS, COMBO_SS)
-from utils import (validate_grayscale, normalize_to_uint8, wrap_errors,)
+from utils import (validate_grayscale, normalize_to_uint8, wrap_errors, show_error_dialog,)
 
 
 class _HistCanvas(QWidget):
@@ -184,28 +184,30 @@ class NoisePanel(QWidget):
         self._gauss_w.setVisible(name == "Gaussian")
         self._uniform_w.setVisible(name == "Uniform")
 
-    @wrap_errors
     def on_inject_clicked(self):
         if self._current_image is None:
             return
-        validate_grayscale(self._current_image)
-        noise_type = self._type_combo.currentText()
+        try:
+            validate_grayscale(self._current_image)
+            noise_type = self._type_combo.currentText()
 
-        if noise_type == "Gaussian":
-            from processing.noise.noise_injection import add_gaussian_noise
-            mean = self._gauss_mean.value()
-            sigma = self._gauss_sigma.value()
-            result = add_gaussian_noise(self._current_image, mean, sigma)
-            op_name = f"Gaussian Noise μ={mean:.0f} σ={sigma:.0f}"
-        else:
-            from processing.noise.noise_injection import add_uniform_noise
-            low = self._uniform_low.value()
-            high = self._uniform_high.value()
-            result = add_uniform_noise(self._current_image, low, high)
-            op_name = f"Uniform Noise [{low:.0f},{high:.0f}]"
+            if noise_type == "Gaussian":
+                from processing.noise.noise_injection import add_gaussian_noise
+                mean = self._gauss_mean.value()
+                sigma = self._gauss_sigma.value()
+                result = add_gaussian_noise(self._current_image, mean, sigma)
+                op_name = f"Gaussian Noise μ={mean:.0f} σ={sigma:.0f}"
+            else:
+                from processing.noise.noise_injection import add_uniform_noise
+                low = self._uniform_low.value()
+                high = self._uniform_high.value()
+                result = add_uniform_noise(self._current_image, low, high)
+                op_name = f"Uniform Noise [{low:.0f},{high:.0f}]"
 
-        result = normalize_to_uint8(result)
-        self.noise_applied.emit(op_name, result)
+            result = normalize_to_uint8(result)
+            self.noise_applied.emit(op_name, result)
+        except (ImportError, NotImplementedError, Exception) as e:
+            show_error_dialog("Noise Error", f"Noise injection failed.\n{e}")
 
     @wrap_errors
     def update_roi_stats(self, image: np.ndarray, roi: QRect):

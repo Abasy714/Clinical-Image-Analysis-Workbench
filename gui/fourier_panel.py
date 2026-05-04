@@ -14,7 +14,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QImage
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, RED, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS)
-from utils import (validate_grayscale, normalize_to_uint8, to_qpixmap, wrap_errors,)
+from utils import (validate_grayscale, normalize_to_uint8, to_qpixmap, wrap_errors, show_error_dialog,)
 
 
 class SpectrumCanvas(QWidget):
@@ -193,40 +193,46 @@ class FourierPanel(QWidget):
 
     # ------------------------------------------------------------------ public
 
-    @wrap_errors
     def set_image(self, image: np.ndarray):
-        validate_grayscale(image)
-        from processing.frequency.spectrum import compute_spectrum
-        shifted_fft, log_magnitude = compute_spectrum(image)
-        self._shifted_fft = shifted_fft
-        self._spectrum_shape = image.shape
-        self._canvas.set_spectrum(log_magnitude)
-        self._clear_notches()
+        """
+        Phase 2 only. Frequency domain spectrum computation.
+        Disabled in Phase 1 — called only when Freq tab is active.
+        """
+        # Store image for when Phase 2 is implemented
+        self._pending_image = image
+        # Do NOT compute spectrum here — compute_spectrum not implemented yet
+        return
 
-    @wrap_errors
     def on_apply_clicked(self):
         if self._shifted_fft is None:
             return
         if not self._notch_points:
             return
-        from processing.frequency.notch_filter import create_notch_filter, apply_notch_filter
-        from processing.frequency.spectrum import inverse_spectrum
+        try:
+            from processing.frequency.notch_filter import create_notch_filter, apply_notch_filter
+            from processing.frequency.spectrum import inverse_spectrum
 
-        shape = self._shifted_fft.shape
-        checked = self._shape_group.checkedButton()
-        kind = checked.text().lower() if checked else "ideal"
-        radius = self._radius_spin.value()
-        order = self._order_spin.value()
+            shape = self._shifted_fft.shape
+            checked = self._shape_group.checkedButton()
+            kind = checked.text().lower() if checked else "ideal"
+            radius = self._radius_spin.value()
+            order = self._order_spin.value()
 
-        combined = np.ones(shape, dtype=np.float64)
-        for u, v in self._notch_points:
-            mask = create_notch_filter(shape, u, v, radius, kind, order)
-            combined *= mask
+            combined = np.ones(shape, dtype=np.float64)
+            for u, v in self._notch_points:
+                mask = create_notch_filter(shape, u, v, radius, kind, order)
+                combined *= mask
 
-        filtered = apply_notch_filter(self._shifted_fft, combined)
-        result = inverse_spectrum(filtered)
-        result = normalize_to_uint8(result)
-        self.notch_applied.emit(f"Notch {kind.title()} D₀={radius}", result)
+            filtered = apply_notch_filter(self._shifted_fft, combined)
+            result = inverse_spectrum(filtered)
+            result = normalize_to_uint8(result)
+            self.notch_applied.emit(f"Notch {kind.title()} D₀={radius}", result)
+        except ImportError:
+            # Phase 2 — frequency domain not implemented yet
+            # No dialog — user will see empty spectrum panel
+            pass
+        except Exception as e:
+            show_error_dialog("Not Implemented", f"Notch filter is not yet available.\n{e}")
 
     # ------------------------------------------------------------------ private
 

@@ -135,7 +135,7 @@ class ImageViewer(QWidget):
 
         # ---- scroll area ----
         self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(False)
+        self._scroll.setWidgetResizable(True)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._scroll.setStyleSheet(f"QScrollArea{{background:{BG};border:none;}}")
         self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -144,6 +144,8 @@ class ImageViewer(QWidget):
         self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._img_label.setStyleSheet(f"background:{BG};color:{MUTED};font-size:11px;")
         self._img_label.setText("No image loaded")
+        self._img_label.setMinimumSize(1, 1)
+        self._img_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._scroll.setWidget(self._img_label)
         layout.addWidget(self._scroll)
 
@@ -163,7 +165,11 @@ class ImageViewer(QWidget):
     # ------------------------------------------------------------------ public API
 
     def set_image(self, image: np.ndarray):
-        self._image = image
+        if image is None:
+            return
+        if image.ndim == 3:
+            image = np.mean(image, axis=2).astype(np.uint8)
+        self._image = normalize_to_uint8(image)
         self._render()
 
     def zoom_in(self):
@@ -236,14 +242,18 @@ class ImageViewer(QWidget):
 
     # ------------------------------------------------------------------ private
 
-    @wrap_errors
     def _render(self):
         if self._image is None:
             return
         zoom_factor = self._zoom / 100.0
+        h, w = self._image.shape[:2]
+        new_h = max(1, int(round(h * zoom_factor)))
+        new_w = max(1, int(round(w * zoom_factor)))
         try:
-            from processing.interpolation.zoom import apply_zoom
-            zoomed = apply_zoom(self._image, zoom_factor, self._interp_mode)
+            from processing.interpolation import nearest_neighbor_resize
+            zoomed = nearest_neighbor_resize(self._image, new_h, new_w)
+            if zoomed is None:
+                zoomed = self._image
         except Exception:
             zoomed = self._image
         data = normalize_to_uint8(zoomed)
