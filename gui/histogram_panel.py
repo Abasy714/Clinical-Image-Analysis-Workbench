@@ -14,7 +14,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, APPLY_BTN_SS)
-from utils import (validate_grayscale, normalize_to_uint8, wrap_errors,)
+from utils import (validate_grayscale, normalize_to_uint8, wrap_errors, show_error_dialog,)
 
 
 class HistogramCanvas(QWidget):
@@ -157,22 +157,33 @@ class HistogramPanel(QWidget):
             if btn.isChecked():
                 bsz = btn.property("bsz")
                 break
-        from processing.histogram.local_equalization import local_histogram_equalization
-        result = local_histogram_equalization(image, bsz)
-        result = normalize_to_uint8(result)
-        self.equalization_applied.emit(f"Local EQ {bsz}×{bsz}", result)
+        try:
+            from processing.histogram.local_equalization import local_histogram_equalization
+            result = local_histogram_equalization(image, bsz)
+            result = normalize_to_uint8(result)
+            self.equalization_applied.emit(f"Local EQ {bsz}×{bsz}", result)
+        except (ImportError, NotImplementedError, Exception) as e:
+            show_error_dialog("Not Implemented", f"Local histogram equalization is not yet available.\n{e}")
 
-    @wrap_errors
     def update_roi(self, image: np.ndarray, roi: QRect):
-        validate_grayscale(image)
-        from processing.noise.roi_stats import extract_roi
-        from processing.histogram.histogram_utils import compute_histogram
-        roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
-        if roi_pixels.size == 0:
+        try:
+            validate_grayscale(image)
+            from processing.noise.roi_stats import extract_roi
+            from processing.histogram.histogram_utils import compute_histogram
+            roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
+            if roi_pixels.size == 0:
+                return
+            hist = compute_histogram(roi_pixels)
+            self._canvas.set_histogram(hist)
+            self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
+            self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
+            self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
+            self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
+        except ImportError as e:
+            import logging
+            logging.getLogger('ciaw').error(f"ROI histogram not ready: {e}")
             return
-        hist = compute_histogram(roi_pixels)
-        self._canvas.set_histogram(hist)
-        self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
-        self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
-        self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
-        self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
+        except Exception as e:
+            import logging
+            logging.getLogger('ciaw').error(f"update_roi error: {e}")
+            return

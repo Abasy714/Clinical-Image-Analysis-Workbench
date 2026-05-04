@@ -1,1 +1,5 @@
-﻿"""Spatial filtering subpackage: convolution, smoothing, edge detection, median."""
+"""Spatial filtering subpackage: convolution, smoothing, edge detection, median."""
+from .convolution import convolve2d
+from .smoothing import average_filter, gaussian_filter
+from .edge_detection import sobel, prewitt, combined_magnitude
+from .median_filter import median_filter

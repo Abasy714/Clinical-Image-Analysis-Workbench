@@ -37,15 +37,17 @@ def median_filter(image: np.ndarray, kernel_size: int) -> np.ndarray:
     img_h, img_w = image.shape
     pad = kernel_size // 2
 
-    padded = np.pad(image, ((pad, pad), (pad, pad)), mode='edge')
-    output = np.zeros((img_h, img_w), dtype=np.float64)
+    padded = np.pad(image, pad, mode='edge')
 
-    for row in range(img_h):
-        for col in range(img_w):
-            neighborhood = padded[row: row + kernel_size,
-                                  col: col + kernel_size]
-            flat = neighborhood.flatten()
-            flat.sort()
-            output[row, col] = flat[len(flat) // 2]
-
+    # Vectorized sliding window — replaces O(H*W) Python loop
+    from numpy.lib.stride_tricks import as_strided
+    shape = (img_h, img_w, kernel_size, kernel_size)
+    strides = (
+        padded.strides[0],
+        padded.strides[1],
+        padded.strides[0],
+        padded.strides[1],
+    )
+    patches = as_strided(padded, shape=shape, strides=strides)
+    output = np.median(patches.reshape(img_h, img_w, -1), axis=2)
     return normalize_to_uint8(output)

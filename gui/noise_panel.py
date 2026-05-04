@@ -14,7 +14,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS, COMBO_SS)
-from utils import (validate_grayscale, normalize_to_uint8, wrap_errors,)
+from utils import (validate_grayscale, normalize_to_uint8, wrap_errors, show_error_dialog,)
 
 
 class _HistCanvas(QWidget):
@@ -184,41 +184,51 @@ class NoisePanel(QWidget):
         self._gauss_w.setVisible(name == "Gaussian")
         self._uniform_w.setVisible(name == "Uniform")
 
-    @wrap_errors
     def on_inject_clicked(self):
         if self._current_image is None:
             return
-        validate_grayscale(self._current_image)
-        noise_type = self._type_combo.currentText()
+        try:
+            validate_grayscale(self._current_image)
+            noise_type = self._type_combo.currentText()
 
-        if noise_type == "Gaussian":
-            from processing.noise.noise_injection import add_gaussian_noise
-            mean = self._gauss_mean.value()
-            sigma = self._gauss_sigma.value()
-            result = add_gaussian_noise(self._current_image, mean, sigma)
-            op_name = f"Gaussian Noise μ={mean:.0f} σ={sigma:.0f}"
-        else:
-            from processing.noise.noise_injection import add_uniform_noise
-            low = self._uniform_low.value()
-            high = self._uniform_high.value()
-            result = add_uniform_noise(self._current_image, low, high)
-            op_name = f"Uniform Noise [{low:.0f},{high:.0f}]"
+            if noise_type == "Gaussian":
+                from processing.noise.noise_injection import add_gaussian_noise
+                mean = self._gauss_mean.value()
+                sigma = self._gauss_sigma.value()
+                result = add_gaussian_noise(self._current_image, mean, sigma)
+                op_name = f"Gaussian Noise μ={mean:.0f} σ={sigma:.0f}"
+            else:
+                from processing.noise.noise_injection import add_uniform_noise
+                low = self._uniform_low.value()
+                high = self._uniform_high.value()
+                result = add_uniform_noise(self._current_image, low, high)
+                op_name = f"Uniform Noise [{low:.0f},{high:.0f}]"
 
-        result = normalize_to_uint8(result)
-        self.noise_applied.emit(op_name, result)
+            result = normalize_to_uint8(result)
+            self.noise_applied.emit(op_name, result)
+        except (ImportError, NotImplementedError, Exception) as e:
+            show_error_dialog("Noise Error", f"Noise injection failed.\n{e}")
 
-    @wrap_errors
     def update_roi_stats(self, image: np.ndarray, roi: QRect):
-        validate_grayscale(image)
-        from processing.noise.roi_stats import compute_roi_stats, extract_roi
-        from processing.histogram.histogram_utils import compute_histogram
-        roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
-        if roi_pixels.size == 0:
+        try:
+            validate_grayscale(image)
+            from processing.noise.roi_stats import compute_roi_stats, extract_roi
+            from processing.histogram.histogram_utils import compute_histogram
+            roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
+            if roi_pixels.size == 0:
+                return
+            hist = compute_histogram(roi_pixels)
+            self._hist_canvas.set_histogram(hist)
+            self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
+            self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
+            self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
+            self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
+            self._stat_labels["count"].setText(f"{roi_pixels.size}")
+        except ImportError as e:
+            import logging
+            logging.getLogger('ciaw').error(f"ROI stats not ready: {e}")
             return
-        hist = compute_histogram(roi_pixels)
-        self._hist_canvas.set_histogram(hist)
-        self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
-        self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
-        self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
-        self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
-        self._stat_labels["count"].setText(f"{roi_pixels.size}")
+        except Exception as e:
+            import logging
+            logging.getLogger('ciaw').error(f"update_roi_stats error: {e}")
+            return

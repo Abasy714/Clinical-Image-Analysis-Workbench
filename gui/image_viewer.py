@@ -4,14 +4,32 @@ Image display widget with zoom controls and interactive ROI drawing.
 Powered entirely by custom interpolation — no built-in zoom libraries used.
 """
 
+import logging
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
                               QPushButton, QScrollArea, QRubberBand, QSizePolicy)
-from PyQt6.QtCore import Qt, QRect, QPoint, QSize, pyqtSignal, QEvent
+from PyQt6.QtCore import Qt, QRect, QPoint, QSize, pyqtSignal, QEvent, QThread
 from PyQt6.QtGui import QPainter, QPen, QColor
 
 from gui.styles import (BG, PANEL, BORDER, BORDER2, ACCENT, MUTED, MUTED2, btn_style)
 from utils import (to_qpixmap, normalize_to_uint8, wrap_errors,)
+
+
+class ZoomWorker(QThread):
+    """Runs zoom/resize in a background thread."""
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class _ImageLabel(QLabel):
@@ -66,6 +84,7 @@ class ImageViewer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._image: np.ndarray | None = None
+        self._display_image: np.ndarray | None = None
         self._zoom: int = 100
         self._interp_mode: str = 'nearest'
         self._roi: QRect | None = None
@@ -135,7 +154,7 @@ class ImageViewer(QWidget):
 
         # ---- scroll area ----
         self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(False)
+        self._scroll.setWidgetResizable(True)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._scroll.setStyleSheet(f"QScrollArea{{background:{BG};border:none;}}")
         self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -144,6 +163,8 @@ class ImageViewer(QWidget):
         self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._img_label.setStyleSheet(f"background:{BG};color:{MUTED};font-size:11px;")
         self._img_label.setText("No image loaded")
+        self._img_label.setMinimumSize(1, 1)
+        self._img_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._scroll.setWidget(self._img_label)
         layout.addWidget(self._scroll)
 
@@ -163,7 +184,21 @@ class ImageViewer(QWidget):
     # ------------------------------------------------------------------ public API
 
     def set_image(self, image: np.ndarray):
-        self._image = image
+        if image is None:
+            return
+        if image.ndim == 3:
+            image = np.mean(image, axis=2).astype(np.uint8)
+        self._image = normalize_to_uint8(image)
+        MAX_DISPLAY = 1024
+        h, w = self._image.shape
+        if h > MAX_DISPLAY or w > MAX_DISPLAY:
+            scale = MAX_DISPLAY / max(h, w)
+            disp_h = max(1, int(h * scale))
+            disp_w = max(1, int(w * scale))
+            from processing.interpolation import nearest_neighbor_resize
+            self._display_image = nearest_neighbor_resize(self._image, disp_h, disp_w)
+        else:
+            self._display_image = self._image
         self._render()
 
     def zoom_in(self):
@@ -232,21 +267,57 @@ class ImageViewer(QWidget):
             self._rubber_band.hide()
             self._origin = QPoint()
             self._roi = self._viewport_rect_to_image_rect(vp_rect)
-            self.roi_selected.emit(self._roi)
+            try:
+                self.roi_selected.emit(self._roi)
+            except Exception as e:
+                import logging
+                logging.getLogger('ciaw').error(f"ROI selection error: {e}")
 
     # ------------------------------------------------------------------ private
 
-    @wrap_errors
     def _render(self):
-        if self._image is None:
+        if self._image is None or self._display_image is None:
             return
+
+        if self._zoom == 100:
+            self._display_array(self._display_image)
+            return
+
         zoom_factor = self._zoom / 100.0
-        try:
-            from processing.interpolation.zoom import apply_zoom
-            zoomed = apply_zoom(self._image, zoom_factor, self._interp_mode)
-        except Exception:
-            zoomed = self._image
-        data = normalize_to_uint8(zoomed)
+        h, w = self._display_image.shape[:2]
+        new_h = max(1, int(round(h * zoom_factor)))
+        new_w = max(1, int(round(w * zoom_factor)))
+        _img = self._display_image.copy()
+        _mode = self._interp_mode
+
+        def _zoom_fn():
+            if _mode == 'nearest':
+                from processing.interpolation import nearest_neighbor_resize
+                result = nearest_neighbor_resize(_img, new_h, new_w)
+                return result if result is not None else _img
+            else:
+                from processing.interpolation import bilinear_resize
+                result = bilinear_resize(_img, new_h, new_w)
+                if result is None:
+                    from processing.interpolation import nearest_neighbor_resize
+                    return nearest_neighbor_resize(_img, new_h, new_w)
+                mn, mx = float(result.min()), float(result.max())
+                if mx > mn:
+                    return ((result.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
+                return np.zeros((new_h, new_w), dtype=np.uint8)
+
+        self._zoom_worker = ZoomWorker(_zoom_fn, parent=self)
+        self._zoom_worker.finished.connect(self._display_array)
+        self._zoom_worker.error.connect(
+            lambda e: logging.getLogger('ciaw').error(f"Zoom error: {e}")
+        )
+        self._zoom_worker.start()
+
+    def _display_array(self, display_image):
+        """Update label with resized array. Must run on main thread."""
+        if display_image is None or display_image.size == 0:
+            return
+        data = normalize_to_uint8(display_image)
         pixmap = to_qpixmap(data)
         self._img_label.setPixmap(pixmap)
         self._img_label.setFixedSize(pixmap.width(), pixmap.height())
