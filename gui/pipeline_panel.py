@@ -189,26 +189,26 @@ class PipelinePanel(QWidget):
         layout.addWidget(btn_row)
 
     def _build_mode_toggle(self) -> QWidget:
-        """Build the cumulative/independent mode toggle row."""
+        """Build a simple ON/OFF pipeline mode toggle."""
         container = QWidget()
-        container.setStyleSheet(f"background:{PANEL};")
+        container.setStyleSheet("background: transparent;")
         hl = QHBoxLayout(container)
-        hl.setContentsMargins(8, 6, 8, 6)
+        hl.setContentsMargins(8, 4, 8, 4)
         hl.setSpacing(6)
 
-        mode_label = QLabel("MODE")
-        mode_label.setStyleSheet(
+        pipe_label = QLabel("PIPELINE")
+        pipe_label.setStyleSheet(
             "QLabel { color:#6b6f65; font-family:'JetBrains Mono',Consolas,monospace;"
             " font-size:9px; font-weight:bold; letter-spacing:1px; }"
         )
-        hl.addWidget(mode_label)
+        hl.addWidget(pipe_label)
 
-        self._cumulative_btn = QPushButton("Cumulative")
-        self._cumulative_btn.setCheckable(True)
-        self._cumulative_btn.setChecked(True)
-        self._cumulative_btn.setFixedHeight(22)
-        self._cumulative_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._cumulative_btn.setStyleSheet("""
+        self._pipe_on_btn = QPushButton("ON")
+        self._pipe_on_btn.setCheckable(True)
+        self._pipe_on_btn.setChecked(True)
+        self._pipe_on_btn.setFixedSize(36, 22)
+        self._pipe_on_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pipe_on_btn.setStyleSheet("""
             QPushButton {
                 background: #1a2208;
                 color: #c8f135;
@@ -218,7 +218,6 @@ class PipelinePanel(QWidget):
                 font-family: 'JetBrains Mono', Consolas, monospace;
                 font-size: 9px;
                 font-weight: bold;
-                padding: 0 8px;
                 letter-spacing: 1px;
             }
             QPushButton:!checked {
@@ -227,15 +226,19 @@ class PipelinePanel(QWidget):
                 border: 1px solid #353730;
                 border-right: none;
             }
+            QPushButton:hover:!checked {
+                color: #eceee8;
+                background: #2c2e2a;
+            }
         """)
-        self._cumulative_btn.clicked.connect(lambda: self._on_mode_clicked('cumulative'))
+        self._pipe_on_btn.clicked.connect(lambda: self._on_mode_clicked('cumulative'))
 
-        self._independent_btn = QPushButton("Independent")
-        self._independent_btn.setCheckable(True)
-        self._independent_btn.setChecked(False)
-        self._independent_btn.setFixedHeight(22)
-        self._independent_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._independent_btn.setStyleSheet("""
+        self._pipe_off_btn = QPushButton("OFF")
+        self._pipe_off_btn.setCheckable(True)
+        self._pipe_off_btn.setChecked(False)
+        self._pipe_off_btn.setFixedSize(36, 22)
+        self._pipe_off_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pipe_off_btn.setStyleSheet("""
             QPushButton {
                 background: #252623;
                 color: #6b6f65;
@@ -244,7 +247,6 @@ class PipelinePanel(QWidget):
                 font-family: 'JetBrains Mono', Consolas, monospace;
                 font-size: 9px;
                 font-weight: bold;
-                padding: 0 8px;
                 letter-spacing: 1px;
             }
             QPushButton:checked {
@@ -252,46 +254,48 @@ class PipelinePanel(QWidget):
                 color: #f5a623;
                 border: 1px solid #8a5a10;
             }
+            QPushButton:hover:!checked {
+                color: #eceee8;
+                background: #2c2e2a;
+            }
         """)
-        self._independent_btn.clicked.connect(lambda: self._on_mode_clicked('independent'))
+        self._pipe_off_btn.clicked.connect(lambda: self._on_mode_clicked('independent'))
 
-        hl.addWidget(self._cumulative_btn)
-        hl.addWidget(self._independent_btn)
-        hl.addStretch()
+        hl.addWidget(self._pipe_on_btn)
+        hl.addWidget(self._pipe_off_btn)
 
-        self._mode_desc = QLabel("ops stack")
+        self._mode_desc = QLabel("stacks on previous")
         self._mode_desc.setStyleSheet(
             "QLabel { color:#4a4d46; font-family:'JetBrains Mono',Consolas,monospace;"
-            " font-size:8px; font-style:italic; }"
+            " font-size:8px; font-style:italic; padding-left:4px; }"
         )
         hl.addWidget(self._mode_desc)
+        hl.addStretch()
 
         return container
 
     def _on_mode_clicked(self, mode: str):
-        """Handle mode toggle click."""
-        is_cumulative = mode == 'cumulative'
-        self._cumulative_btn.setChecked(is_cumulative)
-        self._independent_btn.setChecked(not is_cumulative)
-        if is_cumulative:
-            self._mode_desc.setText("ops stack")
+        """Handle ON/OFF mode toggle. mode is 'cumulative' (ON) or 'independent' (OFF)."""
+        is_on = mode == 'cumulative'
+        self._pipe_on_btn.setChecked(is_on)
+        self._pipe_off_btn.setChecked(not is_on)
+        if is_on:
+            self._mode_desc.setText("stacks on previous")
             self._mode_desc.setStyleSheet(
                 "QLabel { color:#4a4d46; font-family:'JetBrains Mono',Consolas,monospace;"
-                " font-size:8px; font-style:italic; }"
+                " font-size:8px; font-style:italic; padding-left:4px; }"
             )
         else:
-            self._mode_desc.setText("from original")
+            self._mode_desc.setText("always from original")
             self._mode_desc.setStyleSheet(
                 "QLabel { color:#6b4a10; font-family:'JetBrains Mono',Consolas,monospace;"
-                " font-size:8px; font-style:italic; }"
+                " font-size:8px; font-style:italic; padding-left:4px; }"
             )
         self.mode_changed.emit(mode)
 
     def get_mode(self) -> str:
-        """Return currently selected mode string."""
-        if self._cumulative_btn.isChecked():
-            return 'cumulative'
-        return 'independent'
+        """Return current mode string ('cumulative' if ON, else 'independent')."""
+        return 'cumulative' if self._pipe_on_btn.isChecked() else 'independent'
 
     def _style_slot(self, frame: QFrame, label: QLabel, saved: bool, name: str = ""):
         if saved:

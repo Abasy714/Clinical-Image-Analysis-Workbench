@@ -250,7 +250,7 @@ class MainWindow(QMainWindow):
         )
         self._sb_interp = _seg("NN", 40)
         self._sb_roi   = _seg("ROI: none", 100)
-        self._sb_pipe_mode = _seg("PIPE: Cumulative", 130)
+        self._sb_pipe_mode = _seg("PIPE: ON", 90)
         self._sb_pipe_mode.setStyleSheet(
             f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
             f"border-right:1px solid {BORDER};"
@@ -305,6 +305,9 @@ class MainWindow(QMainWindow):
         self._image_viewer.roi_selected.connect(self._on_roi_selected)
         self._image_viewer.zoom_changed.connect(
             lambda z: self._sb_zoom.setText(f"{z}%")
+        )
+        self._image_viewer.interp_changed.connect(
+            lambda m: self._sb_interp.setText(m)
         )
 
         # tab change — compute spectrum only when Freq tab is selected
@@ -414,13 +417,13 @@ class MainWindow(QMainWindow):
         """Switch pipeline mode (cumulative/independent) and update UI."""
         self.pipeline.set_mode(mode)
         if mode == 'cumulative':
-            self._sb_pipe_mode.setText("PIPE: Cumulative")
+            self._sb_pipe_mode.setText("PIPE: ON")
             self._sb_pipe_mode.setStyleSheet(
                 f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
                 f"border-right:1px solid {BORDER};"
             )
         else:
-            self._sb_pipe_mode.setText("PIPE: Independent")
+            self._sb_pipe_mode.setText("PIPE: OFF")
             self._sb_pipe_mode.setStyleSheet(
                 "color:#f5a623;font-size:10px;font-weight:bold;padding:0 8px;"
                 f"border-right:1px solid {BORDER};"

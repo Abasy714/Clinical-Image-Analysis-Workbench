@@ -173,19 +173,35 @@ class FilterPanel(QWidget):
         layout.addWidget(self._kernel_fixed_label)
 
         # kernel preview
-        prev_lbl = QLabel("Kernel preview")
-        prev_lbl.setStyleSheet(FIELD_SS)
-        layout.addWidget(prev_lbl)
+        self._kernel_preview_label = QLabel("KERNEL PREVIEW")
+        self._kernel_preview_label.setStyleSheet(FIELD_SS)
+        layout.addWidget(self._kernel_preview_label)
 
-        self._preview_container = QWidget()
-        self._preview_container.setStyleSheet("background-color: #111210; border: none;")
-        self._preview_container.setFixedHeight(80)
-        self._preview_grid = QGridLayout(self._preview_container)
-        self._preview_grid.setContentsMargins(0, 0, 0, 0)
-        self._preview_grid.setSpacing(2)
-        layout.addWidget(self._preview_container)
+        self._kernel_preview_container = QWidget()
+        self._kernel_preview_container.setStyleSheet("background:#111210;")
+        self._kernel_grid_layout = QGridLayout(self._kernel_preview_container)
+        self._kernel_grid_layout.setContentsMargins(4, 4, 4, 4)
+        self._kernel_grid_layout.setSpacing(2)
 
-        self._preview_cells: list = []
+        self._kernel_scroll = QScrollArea()
+        self._kernel_scroll.setWidget(self._kernel_preview_container)
+        self._kernel_scroll.setWidgetResizable(True)
+        self._kernel_scroll.setFixedHeight(180)
+        self._kernel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._kernel_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._kernel_scroll.setStyleSheet("""
+            QScrollArea {
+                background: #111210;
+                border: 1px solid #2c2e2a;
+                border-radius: 2px;
+            }
+            QScrollBar:horizontal { background: #111210; height: 5px; }
+            QScrollBar::handle:horizontal { background: #353730; border-radius: 2px; min-width: 16px; }
+            QScrollBar:vertical { background: #111210; width: 5px; }
+            QScrollBar::handle:vertical { background: #353730; border-radius: 2px; min-height: 16px; }
+            QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+        """)
+        layout.addWidget(self._kernel_scroll)
 
         # apply button
         self.apply_btn = QPushButton("Apply Filter")
@@ -378,42 +394,54 @@ class FilterPanel(QWidget):
         return "Mag"
 
     def _get_cell_size(self, kernel_size: int) -> tuple:
-        """Return (cell_w, cell_h) that fits kernel_size×kernel_size in panel."""
-        usable_width = 230  # ~270 panel - margins/spacing
-        cell_w = max(14, usable_width // kernel_size)
-        cell_h = max(14, cell_w - 4)
+        """
+        Compute cell dimensions that fit within the scroll area.
+        Scroll area usable width ≈ 240px (panel 280 - margins 24 - scroll 8).
+        """
+        usable = 240
+        raw_w = usable // kernel_size
+        cell_w = max(16, min(52, raw_w))
+        cell_h = max(16, min(32, cell_w - 4))
         return (cell_w, cell_h)
 
     def _build_kernel_cell(self, value: float, max_val: float,
-                            cell_w: int = 38, cell_h: int = 26) -> QLabel:
-        cell = QLabel()
+                            all_equal: bool = False,
+                            cell_w: int = 36, cell_h: int = 24) -> QLabel:
+        # Choose display format based on cell width
+        if cell_w < 22:
+            text = f"{value:.1f}"
+        elif cell_w < 30:
+            text = f"{value:.2f}"
+        else:
+            text = f"{value:.3f}"
+
+        cell = QLabel(text)
         cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cell.setFixedSize(cell_w, cell_h)
 
-        # Adaptive value formatting based on cell width
-        if cell_w < 22:
-            cell.setText(f"{value:.2f}")
-        else:
-            cell.setText(f"{value:.3f}")
-        font_size = max(7, min(9, cell_w // 5))
+        # Safe font size — never below 7
+        font_size = max(7, min(9, cell_w // 4))
 
-        if max_val == 0:
+        # Intensity calculation
+        if max_val == 0 or value == 0:
             intensity = 0.0
+        elif all_equal:
+            intensity = 0.4
         else:
             intensity = abs(value) / max_val
 
         if value > 0:
-            r = int(12 + intensity * (200 - 12))
-            g = int(16 + intensity * (241 - 16))
-            b = int(2  + intensity * (53  - 2))
+            r = int(17 + intensity * (200 - 17))
+            g = int(18 + intensity * (241 - 18))
+            b = int(16 + intensity * (53  - 16))
             bg = f"rgb({r},{g},{b})"
-            text_color = "#0d1002" if intensity > 0.35 else "#6b6f65"
+            text_color = "#0d1002" if intensity > 0.4 else "#6b6f65"
         elif value < 0:
-            r = int(12 + intensity * (180 - 12))
-            g = int(16 + intensity * (30  - 16))
-            b = int(2  + intensity * (30  - 2))
+            r = int(17 + intensity * (255 - 17))
+            g = int(18 + intensity * (77  - 18))
+            b = int(16 + intensity * (58  - 16))
             bg = f"rgb({r},{g},{b})"
-            text_color = "#eceee8" if intensity > 0.35 else "#6b6f65"
+            text_color = "#eceee8" if intensity > 0.4 else "#ff4d3a"
         else:
             bg = "#1e1f1d"
             text_color = "#4a4d46"
@@ -424,7 +452,7 @@ class FilterPanel(QWidget):
                 color: {text_color};
                 border: 1px solid #2c2e2a;
                 border-radius: 1px;
-                font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+                font-family: 'JetBrains Mono', Consolas, monospace;
                 font-size: {font_size}px;
                 font-weight: bold;
             }}
@@ -432,33 +460,55 @@ class FilterPanel(QWidget):
         return cell
 
     def _update_kernel_preview(self):
-        # If a custom kernel is loaded, render that instead
+        """Rebuild kernel preview grid with current filter settings."""
+        filter_type = self._filter_combo.currentText()
+
+        # Determine values + label suffix
         if self._using_custom_kernel and self._custom_kernel is not None:
-            self._render_kernel_grid(self._custom_kernel.flatten().tolist(),
-                                     self._custom_kernel.shape[0])
-            return
+            sz = self._custom_kernel.shape[0]
+            values = self._custom_kernel.flatten().tolist()
+            label_text = f"KERNEL PREVIEW  {sz}×{sz} · Custom"
+        else:
+            sz = self._get_current_kernel_size()
+            sigma = self._sigma_spin.value()
+            values = self._build_kernel_values(sz, sigma, filter_type)
+            label_text = f"KERNEL PREVIEW  {sz}×{sz} · {filter_type}"
+            if filter_type == "Gaussian":
+                label_text += f" σ={sigma:.1f}"
+            elif filter_type in ("Sobel", "Prewitt"):
+                label_text += f" · {self._get_edge_output()}"
 
-        sz = self._get_current_kernel_size()
-        sigma = self._sigma_spin.value()
-        ft = self._filter_combo.currentText()
-        vals = self._build_kernel_values(sz, sigma, ft)
-        self._render_kernel_grid(vals, sz)
+        max_val = max(abs(v) for v in values) if values else 1.0
+        if max_val == 0:
+            max_val = 1.0
+        unique = set(round(v, 6) for v in values)
+        all_equal = len(unique) == 1 and max_val > 0
 
-    def _render_kernel_grid(self, vals: list, sz: int):
-        """Rebuild the kernel preview grid with adaptive cell sizing."""
-        for cell in self._preview_cells:
-            cell.setParent(None)
-        self._preview_cells.clear()
-
-        max_val = max((abs(v) for v in vals), default=1.0) or 1.0
         cell_w, cell_h = self._get_cell_size(sz)
+        self._kernel_preview_label.setText(label_text)
 
-        for row in range(sz):
-            for col in range(sz):
-                v = vals[row * sz + col]
-                cell = self._build_kernel_cell(v, max_val, cell_w, cell_h)
-                self._preview_grid.addWidget(cell, row, col)
-                self._preview_cells.append(cell)
+        # Clear existing grid completely
+        while self._kernel_grid_layout.count():
+            item = self._kernel_grid_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+        # Set grid column minimum widths so cells don't collapse
+        for col in range(sz):
+            self._kernel_grid_layout.setColumnMinimumWidth(col, cell_w)
+
+        # Build new cells
+        for idx, v in enumerate(values):
+            row = idx // sz
+            col = idx % sz
+            cell = self._build_kernel_cell(v, max_val, all_equal, cell_w, cell_h)
+            self._kernel_grid_layout.addWidget(cell, row, col)
+
+        # Force container resize to fit grid
+        self._kernel_preview_container.adjustSize()
+        self._kernel_scroll.updateGeometry()
 
     def _build_kernel_values(self, sz: int, sigma: float, filter_type: str) -> list:
         n = sz * sz

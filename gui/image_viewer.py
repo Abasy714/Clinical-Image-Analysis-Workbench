@@ -80,6 +80,7 @@ class ImageViewer(QWidget):
     roi_selected = pyqtSignal(QRect)
     zoom_changed = pyqtSignal(int)
     coords_changed = pyqtSignal(int, int)
+    interp_changed = pyqtSignal(str)  # 'NN' or 'BL'
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -491,9 +492,11 @@ class ImageViewer(QWidget):
         if self._interp_mode == 'nearest':
             self.set_interpolation_mode('bilinear')
             self._btn_interp.setText("BL")
+            self.interp_changed.emit('BL')
         else:
             self.set_interpolation_mode('nearest')
             self._btn_interp.setText("NN")
+            self.interp_changed.emit('NN')
 
     def _toggle_overlay(self):
         self._show_hist_overlay = not self._show_hist_overlay
