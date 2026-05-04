@@ -3,9 +3,6 @@ Nearest-neighbor interpolation for image resizing, implemented entirely from scr
 Maps each output pixel to the closest input pixel using floor rounding.
 """
 
-# numpy — array operations for coordinate mapping and pixel assignment
-#formula: input position = output position × (input size / output size)
-
 import numpy as np
 from utils.error_handler import wrap_errors
 

@@ -10,22 +10,15 @@ def _compute_tile_lut(block: np.ndarray, clip_limit: float = 3.0, num_levels: in
     avg_count = block.size / num_levels #for clip limiting, divides total no of pixels in tile with levels 
     max_count = max(1, int(clip_limit * avg_count)) #no bin can be more than 3 times the average (clipping)
 
-    excess = 0
-    for i in range(num_levels):
-        if hist[i] > max_count: #cuts down any bins that exceed the max count
-            excess += hist[i] - max_count #stores excess ,the counts that are cut off 
-            hist[i] = max_count
-
-    redistribute = excess // num_levels #splits excess evenly 
+    excess = int(np.sum(np.maximum(hist - max_count, 0)))
+    hist = np.minimum(hist, max_count)
+    redistribute = excess // num_levels
     remainder = excess % num_levels
-    hist = hist + redistribute #adds back excess over all bins 
+    hist = hist + redistribute
     hist[:remainder] += 1
 
     cdf = compute_cdf(hist)
-    lut = np.zeros(num_levels, dtype=np.uint8) #builds the lut
-    for i in range(num_levels):
-        #, for each intensity multiplies by 255,adds 0.5 for rounding ,min clamps it 
-        lut[i] = min(int(cdf[i] * (num_levels - 1) + 0.5), num_levels - 1)
+    lut = np.clip(np.round(cdf * (num_levels - 1)).astype(np.int32), 0, num_levels - 1).astype(np.uint8)
     return lut
 
 
@@ -121,13 +114,8 @@ def local_histogram_equalization(image: np.ndarray, block_size: int, clip_limit:
             block = image[row_start : row_start + block_size, col_start : col_start + block_size]
             luts[ty, tx] = _compute_tile_lut(block, clip_limit=clip_limit) #Computes the clipped equalized LUT for this tile and stores it.
 
-    tile_centers_y = np.zeros(n_tiles_y, dtype=np.float64) #gets center coordinate and the +0.5 puts the center in the middle of the tile 
-    for ty in range(n_tiles_y):
-        tile_centers_y[ty] = (ty + 0.5) * block_size
-
-    tile_centers_x = np.zeros(n_tiles_x, dtype=np.float64)
-    for tx in range(n_tiles_x):
-        tile_centers_x[tx] = (tx + 0.5) * block_size
+    tile_centers_y = (np.arange(n_tiles_y, dtype=np.float64) + 0.5) * block_size
+    tile_centers_x = (np.arange(n_tiles_x, dtype=np.float64) + 0.5) * block_size
 
     output = _interpolate_luts(image, luts, tile_centers_y, tile_centers_x)
 

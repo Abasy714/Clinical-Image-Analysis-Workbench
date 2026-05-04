@@ -11,3 +11,4 @@ from .spatial import (
 )
 from .interpolation import nearest_neighbor_resize, bilinear_resize, bilinear_sample, apply_zoom
 from .geometric import rotate_image, shear_image
+from .histogram import compute_histogram, compute_cdf, local_histogram_equalization

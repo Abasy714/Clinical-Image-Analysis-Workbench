@@ -3,11 +3,6 @@ Handles exporting the current processed image to disk in JPEG or BMP format.
 Converts numpy arrays back to image files using Pillow.
 """
 
-# numpy — image array input
-# Pillow (PIL.Image) — converting array to image file and saving
-# os, pathlib — path construction and directory validation
-# utils.error_handler — wrap_errors
-
 import os
 import numpy as np
 from PIL import Image

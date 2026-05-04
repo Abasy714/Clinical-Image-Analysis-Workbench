@@ -35,6 +35,10 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._connect_signals()
 
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        ba_shortcut = QShortcut(QKeySequence("B"), self)
+        ba_shortcut.activated.connect(self._image_viewer.toggle_before_after)
+
         self._apply_stylesheet()
 
     # ------------------------------------------------------------------ build
@@ -246,6 +250,11 @@ class MainWindow(QMainWindow):
         )
         self._sb_interp = _seg("NN", 40)
         self._sb_roi   = _seg("ROI: none", 100)
+        self._sb_pipe_mode = _seg("PIPE: Cumulative", 130)
+        self._sb_pipe_mode.setStyleSheet(
+            f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
+            f"border-right:1px solid {BORDER};"
+        )
 
         spacer = QWidget()
         spacer.setSizePolicy(
@@ -258,7 +267,7 @@ class MainWindow(QMainWindow):
         self._sb_ready = QLabel("● READY")
         self._sb_ready.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;padding:0 8px;")
 
-        for w in (self._sb_op, self._sb_dim, self._sb_zoom, self._sb_interp, self._sb_roi):
+        for w in (self._sb_op, self._sb_dim, self._sb_zoom, self._sb_interp, self._sb_roi, self._sb_pipe_mode):
             sb.addWidget(w)
         sb.addWidget(spacer, 1)
         for w in (self._sb_pipe, self._sb_mem, self._sb_ready):
@@ -290,6 +299,7 @@ class MainWindow(QMainWindow):
         self._pipeline_panel.reset_requested.connect(self._do_reset)
         self._pipeline_panel.checkpoint_save_requested.connect(self._do_checkpoint_save)
         self._pipeline_panel.checkpoint_restore_requested.connect(self._do_checkpoint_restore)
+        self._pipeline_panel.mode_changed.connect(self._on_pipeline_mode_changed)
 
         # image viewer
         self._image_viewer.roi_selected.connect(self._on_roi_selected)
@@ -320,6 +330,8 @@ class MainWindow(QMainWindow):
             return
         self.pipeline.set_original(image)
         self._image_viewer.set_image(image)
+        if hasattr(self._image_viewer, 'set_before_image'):
+            self._image_viewer.set_before_image(image)
         self._metadata_panel.update_metadata(metadata)
         self._pipeline_panel.refresh_stack()
         self._pipeline_panel.update_checkpoints()
@@ -351,11 +363,12 @@ class MainWindow(QMainWindow):
         self._image_viewer.set_image(result)
         self._pipeline_panel.refresh_stack()
         self._pipeline_panel.update_checkpoints()
-        self._morph_panel.set_image(result)
-        self._noise_panel.set_image(result)
+        base = self.pipeline.get_base_image()
+        self._morph_panel.set_image(base)
+        self._noise_panel.set_image(base)
         # Phase 2 only — frequency domain disabled in Phase 1
         # self._fourier_panel.set_image(result)
-        self._filter_panel.set_current_image(result)
+        self._filter_panel.set_current_image(base)
 
         stack_depth = len(self.pipeline.get_stack_names())
         self._sb_op.setText(f"OP: {op_name[:18]}")
@@ -384,17 +397,50 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ panel dispatch
 
     def _on_filter_apply(self):
-        image = self.pipeline.current()
+        image = self.pipeline.get_base_image()
         if image is None:
             return
         self._image_viewer.show_processing_overlay(True)
+        self._filter_panel.set_current_image(image)
         self._filter_panel.on_apply_clicked(image)
 
     def _on_kernel_modal(self):
-        self._filter_panel.open_kernel_modal(self.pipeline.current())
+        self._filter_panel.open_kernel_modal(self.pipeline.get_base_image())
 
     def _on_hist_apply(self):
-        self._hist_panel.on_apply_clicked(self.pipeline.current())
+        self._hist_panel.on_apply_clicked(self.pipeline.get_base_image())
+
+    def _on_pipeline_mode_changed(self, mode: str):
+        """Switch pipeline mode (cumulative/independent) and update UI."""
+        self.pipeline.set_mode(mode)
+        if mode == 'cumulative':
+            self._sb_pipe_mode.setText("PIPE: Cumulative")
+            self._sb_pipe_mode.setStyleSheet(
+                f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
+                f"border-right:1px solid {BORDER};"
+            )
+        else:
+            self._sb_pipe_mode.setText("PIPE: Independent")
+            self._sb_pipe_mode.setStyleSheet(
+                "color:#f5a623;font-size:10px;font-weight:bold;padding:0 8px;"
+                f"border-right:1px solid {BORDER};"
+            )
+        # Update panels' source image to the new base
+        base = self.pipeline.get_base_image()
+        if base is not None:
+            try:
+                self._morph_panel.set_image(base)
+            except Exception:
+                pass
+            try:
+                self._noise_panel.set_image(base)
+            except Exception:
+                pass
+            try:
+                self._filter_panel.set_current_image(base)
+            except Exception:
+                pass
+        self.logger.info(f"Pipeline mode: {mode}")
 
     def _on_roi_selected(self, roi):
         try:
@@ -431,6 +477,8 @@ class MainWindow(QMainWindow):
     def _do_reset(self):
         image = self.pipeline.reset()
         self._image_viewer.set_image(image)
+        if hasattr(self._image_viewer, 'set_before_image'):
+            self._image_viewer.set_before_image(image)
         self._pipeline_panel.refresh_stack()
         self._sb_op.setText("OP: reset")
         self._sb_pipe.setText("STACK: 0")

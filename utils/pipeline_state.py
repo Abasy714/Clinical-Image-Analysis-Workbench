@@ -4,22 +4,6 @@ Manages the sequential image enhancement pipeline state.
 Maintains an ordered stack of (operation_name, image_array) pairs with undo and reset support.
 """
 
-# numpy — image array storage and copying
-# collections.deque — efficient stack with max length for memory safety
-
-# CONSTANTS
-# MAX_STACK_SIZE = 20
-
-# FUNCTIONS / CLASSES
-# class PipelineState:
-#   def __init__: initialize empty stack, store reference to original image
-#   def set_original(image): store the base image, clear stack
-#   def push(op_name, image): append (op_name, image.copy()) to stack
-#   def undo() -> np.ndarray: pop last entry, return previous image (or original if stack empty)
-#   def reset() -> np.ndarray: clear stack, return original image
-#   def current() -> np.ndarray: return top of stack or original
-#   def get_stack_names() -> list[str]: return list of operation names for UI display
-
 import numpy as np
 from collections import deque
 
@@ -38,6 +22,7 @@ class PipelineState:
         self._stack: deque = deque(maxlen=MAX_STACK_SIZE)
         self._original: np.ndarray | None = None
         self._checkpoints: dict = {}
+        self._mode: str = 'cumulative'  # 'cumulative' or 'independent'
 
     def set_original(self, image: np.ndarray):
         self._original = image.copy()
@@ -62,6 +47,43 @@ class PipelineState:
 
     def get_stack_names(self) -> list:
         return [name for name, _ in self._stack]
+
+    def get_stack_entries(self) -> list:
+        """Return list of (op_name, image) tuples from bottom to top."""
+        return list(self._stack)
+
+    def get_original(self) -> np.ndarray:
+        """Return the original image set by set_original (or empty fallback)."""
+        return self._original if self._original is not None else _EMPTY
+
+    def current_op(self) -> str:
+        """Return the name of the top operation, or 'Original' if stack empty."""
+        if self._stack:
+            return self._stack[-1][0]
+        return "Original"
+
+    def set_mode(self, mode: str):
+        """
+        Set pipeline mode.
+        'cumulative': each op applies on previous result (default)
+        'independent': each op applies on original image
+        """
+        assert mode in ('cumulative', 'independent'), f"Invalid mode: {mode}"
+        self._mode = mode
+
+    def get_mode(self) -> str:
+        """Return current pipeline mode ('cumulative' or 'independent')."""
+        return self._mode
+
+    def get_base_image(self) -> np.ndarray:
+        """
+        Return the image that the NEXT operation should apply to.
+        Cumulative: top of stack (or original if empty)
+        Independent: always original
+        """
+        if self._mode == 'independent':
+            return self.get_original()
+        return self.current()
 
     def save_checkpoint(self, slot: str):
         img = self.current()

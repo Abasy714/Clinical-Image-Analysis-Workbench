@@ -63,6 +63,8 @@ class FilterPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_image: np.ndarray | None = None
+        self._custom_kernel: np.ndarray | None = None
+        self._using_custom_kernel: bool = False
         self.setStyleSheet(f"background:{PANEL};")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -98,35 +100,77 @@ class FilterPanel(QWidget):
         self._sigma_row.hide()
         layout.addWidget(self._sigma_row)
 
-        # edge output row (Sobel/Prewitt)
+        # edge output row (Sobel/Prewitt) — styled toggle buttons
         self._edge_row = QWidget()
-        er = QHBoxLayout(self._edge_row)
-        er.setContentsMargins(0, 0, 0, 0)
-        output_lbl = QLabel("Output")
+        er = QVBoxLayout(self._edge_row)
+        er.setContentsMargins(0, 4, 0, 0)
+        er.setSpacing(4)
+        output_lbl = QLabel("OUTPUT")
         output_lbl.setStyleSheet(FIELD_SS)
         er.addWidget(output_lbl)
-        self._edge_group = QButtonGroup(self)
+        edge_btn_row = QWidget()
+        edge_btn_layout = QHBoxLayout(edge_btn_row)
+        edge_btn_layout.setSpacing(3)
+        edge_btn_layout.setContentsMargins(0, 0, 0, 0)
         self._edge_btns: dict = {}
-        for label in ("H", "V", "Mag"):
-            rb = QRadioButton(label)
-            rb.setStyleSheet(f"color:{TEXT};font-size:9px;")
-            self._edge_group.addButton(rb)
-            self._edge_btns[label] = rb
-            er.addWidget(rb)
-        self._edge_group.buttons()[2].setChecked(True)
+        for key in ("H", "V", "Mag"):
+            btn = QPushButton(key)
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #252623;
+                    color: #6b6f65;
+                    border: 1px solid #353730;
+                    border-radius: 2px;
+                    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+                    font-size: 10px;
+                    font-weight: bold;
+                    padding: 0 10px;
+                }
+                QPushButton:checked {
+                    background: #1a2208;
+                    color: #c8f135;
+                    border-color: #6a8a10;
+                }
+                QPushButton:hover:!checked {
+                    color: #eceee8;
+                    border-color: #484b44;
+                    background: #2c2e2a;
+                }
+            """)
+            btn.clicked.connect(lambda checked, k=key: self._on_edge_btn_clicked(k))
+            self._edge_btns[key] = btn
+            edge_btn_layout.addWidget(btn)
+        self._edge_btns["Mag"].setChecked(True)
+        er.addWidget(edge_btn_row)
         self._edge_row.hide()
         layout.addWidget(self._edge_row)
 
         # kernel size
-        ksz_lbl = QLabel("Kernel size")
-        ksz_lbl.setStyleSheet(FIELD_SS)
-        layout.addWidget(ksz_lbl)
+        self._ksz_lbl = QLabel("Kernel size")
+        self._ksz_lbl.setStyleSheet(FIELD_SS)
+        layout.addWidget(self._ksz_lbl)
 
         self._custom_ksz: int | None = None
-        ksz_row_widget = QWidget()
+        self._kernel_size_widget = QWidget()
         krl = self._build_kernel_size_row()
-        ksz_row_widget.setLayout(krl)
-        layout.addWidget(ksz_row_widget)
+        self._kernel_size_widget.setLayout(krl)
+        layout.addWidget(self._kernel_size_widget)
+
+        self._kernel_fixed_label = QLabel("3×3  (fixed for edge operators)")
+        self._kernel_fixed_label.setStyleSheet("""
+            QLabel {
+                color: #6b6f65;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 10px;
+                font-style: italic;
+                padding: 4px 0;
+            }
+        """)
+        self._kernel_fixed_label.setVisible(False)
+        layout.addWidget(self._kernel_fixed_label)
 
         # kernel preview
         prev_lbl = QLabel("Kernel preview")
@@ -172,9 +216,13 @@ class FilterPanel(QWidget):
         self._angle_spin.setValue(45.0)
         self._angle_spin.setSingleStep(1.0)
         self._angle_spin.setStyleSheet(SPINBOX_SS)
-        rrl.addWidget(self._angle_spin)
+        self._angle_spin.setMinimumWidth(80)
+        self._angle_spin.setMaximumWidth(120)
+        rrl.addWidget(self._angle_spin, 1)
         self._rotate_btn = QPushButton("Rotate")
         self._rotate_btn.setStyleSheet(APPLY_BTN_SS)
+        self._rotate_btn.setFixedWidth(80)
+        self._rotate_btn.setFixedHeight(28)
         rrl.addWidget(self._rotate_btn)
         layout.addWidget(rot_row)
 
@@ -182,8 +230,9 @@ class FilterPanel(QWidget):
         shear_row = QWidget()
         shl = QHBoxLayout(shear_row)
         shl.setContentsMargins(0, 0, 0, 0)
-        shl.setSpacing(6)
+        shl.setSpacing(4)
         sx_lbl = QLabel("Sx")
+        sx_lbl.setFixedWidth(16)
         sx_lbl.setStyleSheet(FIELD_SS)
         shl.addWidget(sx_lbl)
         self._shear_x_spin = QDoubleSpinBox()
@@ -191,8 +240,11 @@ class FilterPanel(QWidget):
         self._shear_x_spin.setValue(0.3)
         self._shear_x_spin.setSingleStep(0.05)
         self._shear_x_spin.setStyleSheet(SPINBOX_SS)
-        shl.addWidget(self._shear_x_spin)
+        self._shear_x_spin.setMinimumWidth(60)
+        self._shear_x_spin.setMaximumWidth(90)
+        shl.addWidget(self._shear_x_spin, 1)
         sy_lbl = QLabel("Sy")
+        sy_lbl.setFixedWidth(16)
         sy_lbl.setStyleSheet(FIELD_SS)
         shl.addWidget(sy_lbl)
         self._shear_y_spin = QDoubleSpinBox()
@@ -200,9 +252,13 @@ class FilterPanel(QWidget):
         self._shear_y_spin.setValue(0.0)
         self._shear_y_spin.setSingleStep(0.05)
         self._shear_y_spin.setStyleSheet(SPINBOX_SS)
-        shl.addWidget(self._shear_y_spin)
+        self._shear_y_spin.setMinimumWidth(60)
+        self._shear_y_spin.setMaximumWidth(90)
+        shl.addWidget(self._shear_y_spin, 1)
         self._shear_btn = QPushButton("Shear")
         self._shear_btn.setStyleSheet(APPLY_BTN_SS)
+        self._shear_btn.setFixedWidth(80)
+        self._shear_btn.setFixedHeight(28)
         shl.addWidget(self._shear_btn)
         layout.addWidget(shear_row)
 
@@ -219,7 +275,17 @@ class FilterPanel(QWidget):
 
     def _on_filter_changed(self, name: str):
         self._sigma_row.setVisible(name == "Gaussian")
-        self._edge_row.setVisible(name in ("Sobel", "Prewitt"))
+        is_edge = name in ("Sobel", "Prewitt")
+        self._edge_row.setVisible(is_edge)
+        if is_edge:
+            self._ksz_lbl.setVisible(False)
+            self._kernel_size_widget.setVisible(False)
+            self._kernel_fixed_label.setVisible(True)
+            self._current_kernel_size = 3
+        else:
+            self._ksz_lbl.setVisible(True)
+            self._kernel_size_widget.setVisible(True)
+            self._kernel_fixed_label.setVisible(False)
         self._update_kernel_preview()
 
     def _build_kernel_size_row(self) -> QHBoxLayout:
@@ -300,14 +366,36 @@ class FilterPanel(QWidget):
     def set_current_image(self, image: np.ndarray):
         self._current_image = image
 
-    def _get_edge_output(self) -> str:
-        checked = self._edge_group.checkedButton()
-        return checked.text() if checked else "Mag"
+    def _on_edge_btn_clicked(self, key: str):
+        for k, btn in self._edge_btns.items():
+            btn.setChecked(k == key)
+        self._update_kernel_preview()
 
-    def _build_kernel_cell(self, value: float, max_val: float) -> QLabel:
-        cell = QLabel(f"{value:.3f}")
+    def _get_edge_output(self) -> str:
+        for key, btn in self._edge_btns.items():
+            if btn.isChecked():
+                return key
+        return "Mag"
+
+    def _get_cell_size(self, kernel_size: int) -> tuple:
+        """Return (cell_w, cell_h) that fits kernel_size×kernel_size in panel."""
+        usable_width = 230  # ~270 panel - margins/spacing
+        cell_w = max(14, usable_width // kernel_size)
+        cell_h = max(14, cell_w - 4)
+        return (cell_w, cell_h)
+
+    def _build_kernel_cell(self, value: float, max_val: float,
+                            cell_w: int = 38, cell_h: int = 26) -> QLabel:
+        cell = QLabel()
         cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cell.setFixedSize(38, 26)
+        cell.setFixedSize(cell_w, cell_h)
+
+        # Adaptive value formatting based on cell width
+        if cell_w < 22:
+            cell.setText(f"{value:.2f}")
+        else:
+            cell.setText(f"{value:.3f}")
+        font_size = max(7, min(9, cell_w // 5))
 
         if max_val == 0:
             intensity = 0.0
@@ -315,21 +403,18 @@ class FilterPanel(QWidget):
             intensity = abs(value) / max_val
 
         if value > 0:
-            # Positive weight: acid-lime tint, scaled by intensity
             r = int(12 + intensity * (200 - 12))
             g = int(16 + intensity * (241 - 16))
             b = int(2  + intensity * (53  - 2))
             bg = f"rgb({r},{g},{b})"
             text_color = "#0d1002" if intensity > 0.35 else "#6b6f65"
         elif value < 0:
-            # Negative weight (Laplacian, Sobel): red tint
             r = int(12 + intensity * (180 - 12))
             g = int(16 + intensity * (30  - 16))
             b = int(2  + intensity * (30  - 2))
             bg = f"rgb({r},{g},{b})"
             text_color = "#eceee8" if intensity > 0.35 else "#6b6f65"
         else:
-            # Zero: near-black background, very muted text
             bg = "#1e1f1d"
             text_color = "#4a4d46"
 
@@ -340,29 +425,38 @@ class FilterPanel(QWidget):
                 border: 1px solid #2c2e2a;
                 border-radius: 1px;
                 font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-                font-size: 9px;
+                font-size: {font_size}px;
                 font-weight: bold;
             }}
         """)
         return cell
 
     def _update_kernel_preview(self):
+        # If a custom kernel is loaded, render that instead
+        if self._using_custom_kernel and self._custom_kernel is not None:
+            self._render_kernel_grid(self._custom_kernel.flatten().tolist(),
+                                     self._custom_kernel.shape[0])
+            return
+
         sz = self._get_current_kernel_size()
         sigma = self._sigma_spin.value()
         ft = self._filter_combo.currentText()
         vals = self._build_kernel_values(sz, sigma, ft)
+        self._render_kernel_grid(vals, sz)
 
-        # rebuild grid
+    def _render_kernel_grid(self, vals: list, sz: int):
+        """Rebuild the kernel preview grid with adaptive cell sizing."""
         for cell in self._preview_cells:
             cell.setParent(None)
         self._preview_cells.clear()
 
         max_val = max((abs(v) for v in vals), default=1.0) or 1.0
+        cell_w, cell_h = self._get_cell_size(sz)
 
         for row in range(sz):
             for col in range(sz):
                 v = vals[row * sz + col]
-                cell = self._build_kernel_cell(v, max_val)
+                cell = self._build_kernel_cell(v, max_val, cell_w, cell_h)
                 self._preview_grid.addWidget(cell, row, col)
                 self._preview_cells.append(cell)
 
@@ -382,28 +476,17 @@ class FilterPanel(QWidget):
                     vals.append(v)
                     total += v
             return [v / total for v in vals]
-        if filter_type == "Sobel":
-            base = [-1, 0, 1, -2, 0, 2, -1, 0, 1]
-            if sz == 3:
-                return base
-            out = [0.0] * n
-            offset_r = (sz - 3) // 2
-            offset_c = (sz - 3) // 2
-            for i in range(3):
-                for j in range(3):
-                    out[(i + offset_r) * sz + j + offset_c] = float(base[i * 3 + j])
-            return out
-        if filter_type == "Prewitt":
-            base = [-1, 0, 1, -1, 0, 1, -1, 0, 1]
-            if sz == 3:
-                return base
-            out = [0.0] * n
-            offset_r = (sz - 3) // 2
-            offset_c = (sz - 3) // 2
-            for i in range(3):
-                for j in range(3):
-                    out[(i + offset_r) * sz + j + offset_c] = float(base[i * 3 + j])
-            return out
+        if filter_type in ("Sobel", "Prewitt"):
+            edge = self._get_edge_output()  # 'H', 'V', or 'Mag'
+            if filter_type == "Sobel":
+                Kx = [-1, 0, 1, -2, 0, 2, -1, 0, 1]
+                Ky = [-1, -2, -1, 0, 0, 0, 1, 2, 1]
+            else:  # Prewitt
+                Kx = [-1, 0, 1, -1, 0, 1, -1, 0, 1]
+                Ky = [-1, -1, -1, 0, 0, 0, 1, 1, 1]
+            # H = horizontal edges = Ky kernel; V = vertical edges = Kx; Mag shows Kx as representative
+            base = Ky if edge == "H" else Kx
+            return [float(v) for v in base]
         return [0.0] * n  # Median — non-linear, no kernel
 
     def _get_current_kernel_size(self) -> int:
@@ -423,6 +506,23 @@ class FilterPanel(QWidget):
 
         _image = image.copy()
         _sz = sz
+
+        # Custom kernel path — overrides dropdown selection
+        if self._using_custom_kernel and self._custom_kernel is not None:
+            _kernel = self._custom_kernel.copy()
+            _ksz = _kernel.shape[0]
+            self._using_custom_kernel = False  # one-shot
+            def _fn():
+                from processing.spatial import convolve2d
+                from utils import normalize_to_uint8 as _n
+                raw = convolve2d(_image.astype(np.float64), _kernel)
+                return _n(raw)
+            _op = f"Custom {_ksz}×{_ksz}"
+            self._worker = FilterWorker(_fn, _op, parent=self)
+            self._worker.finished.connect(self._on_worker_finished)
+            self._worker.error.connect(self._on_worker_error)
+            self._worker.start()
+            return
 
         if ft == "Average":
             def _fn():
@@ -523,10 +623,12 @@ class FilterPanel(QWidget):
         dlg = KernelEditorDialog(sigma=self._sigma_spin.value(), parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             kernel = dlg.get_kernel()
-            from processing.spatial import convolve2d
-            raw = convolve2d(image.astype(np.float64), kernel)
-            result = normalize_to_uint8(raw)
-            self.filter_applied.emit(f"Custom {kernel.shape[0]}×{kernel.shape[1]}", result)
+            if kernel is None or kernel.size == 0:
+                return
+            self._custom_kernel = kernel
+            self._using_custom_kernel = True
+            # Refresh preview to show custom kernel; user must click Apply Filter to apply
+            self._update_kernel_preview()
 
 
 # ---------------------------------------------------------------------------
@@ -552,20 +654,47 @@ class KernelEditorDialog(QDialog):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
-        # size selector
+        # size selector — styled toggle buttons
         sz_row = QWidget()
         srl = QHBoxLayout(sz_row)
         srl.setContentsMargins(0, 0, 0, 0)
-        srl.addWidget(QLabel("Size:", styleSheet=f"color:{MUTED};"))
-        self._sz_group = QButtonGroup(self)
+        srl.setSpacing(4)
+        size_lbl = QLabel("Size:")
+        size_lbl.setStyleSheet(
+            f"color:{MUTED};font-family:'JetBrains Mono',Consolas,monospace;"
+            f"font-size:10px;font-weight:bold;"
+        )
+        srl.addWidget(size_lbl)
+        self._size_btns = {}
         for sz in self._SIZES:
-            rb = QRadioButton(f"{sz}")
-            rb.setProperty("sz", sz)
-            rb.setStyleSheet(f"color:{TEXT};font-size:10px;")
-            self._sz_group.addButton(rb)
-            srl.addWidget(rb)
-            if sz == 5:
-                rb.setChecked(True)
+            btn = QPushButton(str(sz))
+            btn.setCheckable(True)
+            btn.setFixedSize(32, 26)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #252623;
+                    color: #6b6f65;
+                    border: 1px solid #353730;
+                    border-radius: 2px;
+                    font-family: 'JetBrains Mono', Consolas, monospace;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QPushButton:checked {
+                    background: #1a2208;
+                    color: #c8f135;
+                    border-color: #6a8a10;
+                }
+                QPushButton:hover:!checked {
+                    color: #eceee8;
+                    background: #2c2e2a;
+                }
+            """)
+            btn.clicked.connect(lambda checked, s=sz: self._on_size_clicked(s))
+            self._size_btns[sz] = btn
+            srl.addWidget(btn)
+        self._size_btns[5].setChecked(True)
         srl.addStretch()
         layout.addWidget(sz_row)
 
@@ -615,8 +744,12 @@ class KernelEditorDialog(QDialog):
         brl.addWidget(accept)
         layout.addWidget(btn_row)
 
-        self._sz_group.buttonClicked.connect(lambda b: self._build_grid(b.property("sz")))
         self._build_grid(5)
+
+    def _on_size_clicked(self, sz: int):
+        for s, btn in self._size_btns.items():
+            btn.setChecked(s == sz)
+        self._build_grid(sz)
 
     def _build_grid(self, sz: int):
         self._current_sz = sz

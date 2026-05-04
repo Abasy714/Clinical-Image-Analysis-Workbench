@@ -21,6 +21,7 @@ class PipelinePanel(QWidget):
     reset_requested = pyqtSignal()
     checkpoint_save_requested = pyqtSignal(str)
     checkpoint_restore_requested = pyqtSignal(str)
+    mode_changed = pyqtSignal(str)  # 'cumulative' or 'independent'
 
     _SLOTS = ['A', 'B', 'C', 'D']
 
@@ -45,6 +46,15 @@ class PipelinePanel(QWidget):
             f"QPushButton:hover {{ background: {INPUT}; }}"
         )
         layout.addWidget(hdr)
+
+        # mode toggle (Cumulative / Independent)
+        mode_toggle = self._build_mode_toggle()
+        layout.addWidget(mode_toggle)
+
+        mode_sep = QFrame()
+        mode_sep.setFixedHeight(1)
+        mode_sep.setStyleSheet(f"background:{BORDER};")
+        layout.addWidget(mode_sep)
 
         # checkpoint 2×2 grid
         ckpt_w = QWidget()
@@ -177,6 +187,111 @@ class PipelinePanel(QWidget):
         self._reset_btn.clicked.connect(self.reset_requested)
         brl.addWidget(self._reset_btn)
         layout.addWidget(btn_row)
+
+    def _build_mode_toggle(self) -> QWidget:
+        """Build the cumulative/independent mode toggle row."""
+        container = QWidget()
+        container.setStyleSheet(f"background:{PANEL};")
+        hl = QHBoxLayout(container)
+        hl.setContentsMargins(8, 6, 8, 6)
+        hl.setSpacing(6)
+
+        mode_label = QLabel("MODE")
+        mode_label.setStyleSheet(
+            "QLabel { color:#6b6f65; font-family:'JetBrains Mono',Consolas,monospace;"
+            " font-size:9px; font-weight:bold; letter-spacing:1px; }"
+        )
+        hl.addWidget(mode_label)
+
+        self._cumulative_btn = QPushButton("Cumulative")
+        self._cumulative_btn.setCheckable(True)
+        self._cumulative_btn.setChecked(True)
+        self._cumulative_btn.setFixedHeight(22)
+        self._cumulative_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cumulative_btn.setStyleSheet("""
+            QPushButton {
+                background: #1a2208;
+                color: #c8f135;
+                border: 1px solid #6a8a10;
+                border-right: none;
+                border-radius: 2px 0 0 2px;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 9px;
+                font-weight: bold;
+                padding: 0 8px;
+                letter-spacing: 1px;
+            }
+            QPushButton:!checked {
+                background: #252623;
+                color: #6b6f65;
+                border: 1px solid #353730;
+                border-right: none;
+            }
+        """)
+        self._cumulative_btn.clicked.connect(lambda: self._on_mode_clicked('cumulative'))
+
+        self._independent_btn = QPushButton("Independent")
+        self._independent_btn.setCheckable(True)
+        self._independent_btn.setChecked(False)
+        self._independent_btn.setFixedHeight(22)
+        self._independent_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._independent_btn.setStyleSheet("""
+            QPushButton {
+                background: #252623;
+                color: #6b6f65;
+                border: 1px solid #353730;
+                border-radius: 0 2px 2px 0;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 9px;
+                font-weight: bold;
+                padding: 0 8px;
+                letter-spacing: 1px;
+            }
+            QPushButton:checked {
+                background: #2d1a08;
+                color: #f5a623;
+                border: 1px solid #8a5a10;
+            }
+        """)
+        self._independent_btn.clicked.connect(lambda: self._on_mode_clicked('independent'))
+
+        hl.addWidget(self._cumulative_btn)
+        hl.addWidget(self._independent_btn)
+        hl.addStretch()
+
+        self._mode_desc = QLabel("ops stack")
+        self._mode_desc.setStyleSheet(
+            "QLabel { color:#4a4d46; font-family:'JetBrains Mono',Consolas,monospace;"
+            " font-size:8px; font-style:italic; }"
+        )
+        hl.addWidget(self._mode_desc)
+
+        return container
+
+    def _on_mode_clicked(self, mode: str):
+        """Handle mode toggle click."""
+        is_cumulative = mode == 'cumulative'
+        self._cumulative_btn.setChecked(is_cumulative)
+        self._independent_btn.setChecked(not is_cumulative)
+        if is_cumulative:
+            self._mode_desc.setText("ops stack")
+            self._mode_desc.setStyleSheet(
+                "QLabel { color:#4a4d46; font-family:'JetBrains Mono',Consolas,monospace;"
+                " font-size:8px; font-style:italic; }"
+            )
+        else:
+            self._mode_desc.setText("from original")
+            self._mode_desc.setStyleSheet(
+                "QLabel { color:#6b4a10; font-family:'JetBrains Mono',Consolas,monospace;"
+                " font-size:8px; font-style:italic; }"
+            )
+        self.mode_changed.emit(mode)
+
+    def get_mode(self) -> str:
+        """Return currently selected mode string."""
+        if self._cumulative_btn.isChecked():
+            return 'cumulative'
+        return 'independent'
 
     def _style_slot(self, frame: QFrame, label: QLabel, saved: bool, name: str = ""):
         if saved:

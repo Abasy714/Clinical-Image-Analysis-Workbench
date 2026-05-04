@@ -3,10 +3,6 @@ Zoom dispatcher that routes zoom requests to either nearest-neighbor or bilinear
 Maintains the zoom factor and selected interpolation mode.
 """
 
-# numpy — array passthrough
-# processing.interpolation.nearest_neighbor — nearest_neighbor_resize
-# processing.interpolation.bilinear — bilinear_resize
-
 import numpy as np
 from utils.error_handler import wrap_errors
 from processing.interpolation.nearest_neighbor import nearest_neighbor_resize

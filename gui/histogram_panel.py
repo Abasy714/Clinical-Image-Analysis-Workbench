@@ -8,7 +8,7 @@ import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                               QLabel, QButtonGroup, QRadioButton, QGridLayout,
                               QSizePolicy, QFrame)
-from PyQt6.QtCore import pyqtSignal, Qt, QRect
+from PyQt6.QtCore import pyqtSignal, Qt, QRect, QThread
 from PyQt6.QtGui import QPainter, QColor, QPen
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
@@ -66,6 +66,25 @@ class HistogramCanvas(QWidget):
             painter.fillRect(x, h - padding - bar_h, bar_w, bar_h, accent_color)
 
         painter.end()
+
+
+class HistWorker(QThread):
+    """Runs local histogram equalization in a background thread."""
+    finished = pyqtSignal(str, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, fn, op_name: str, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._op_name = op_name
+
+    def run(self):
+        try:
+            result = self._fn()
+            self.finished.emit(self._op_name, result)
+        except Exception as e:
+            import traceback
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class HistogramPanel(QWidget):
@@ -149,41 +168,79 @@ class HistogramPanel(QWidget):
 
         layout.addStretch()
 
-    @wrap_errors
     def on_apply_clicked(self, image: np.ndarray):
-        validate_grayscale(image)
-        bsz = 8
+        try:
+            validate_grayscale(image)
+        except Exception as e:
+            show_error_dialog("Invalid Image", str(e))
+            return
+
+        block_size = self._get_block_size()
+        _image = image.copy()
+        _block_size = block_size
+
+        try:
+            from processing.histogram import local_histogram_equalization  # noqa: F401
+        except ImportError as e:
+            import logging
+            logging.getLogger('ciaw').error(f"local_histogram_equalization not ready: {e}")
+            show_error_dialog("Not Implemented", "Local histogram equalization is not available yet.")
+            return
+
+        def _fn():
+            from processing.histogram import local_histogram_equalization
+            from utils import normalize_to_uint8 as _n
+            return _n(local_histogram_equalization(_image, _block_size))
+
+        self._hist_worker = HistWorker(_fn, f"Local EQ {block_size}×{block_size}", parent=self)
+        self._hist_worker.finished.connect(self._on_hist_finished)
+        self._hist_worker.error.connect(self._on_hist_error)
+        self._hist_worker.start()
+
+    def _get_block_size(self) -> int:
         for btn in self._bsz_group.buttons():
             if btn.isChecked():
-                bsz = btn.property("bsz")
-                break
-        try:
-            from processing.histogram.local_equalization import local_histogram_equalization
-            result = local_histogram_equalization(image, bsz)
-            result = normalize_to_uint8(result)
-            self.equalization_applied.emit(f"Local EQ {bsz}×{bsz}", result)
-        except (ImportError, NotImplementedError, Exception) as e:
-            show_error_dialog("Not Implemented", f"Local histogram equalization is not yet available.\n{e}")
+                return int(btn.property("bsz"))
+        return 8
+
+    def _on_hist_finished(self, op_name: str, result):
+        if result is not None and isinstance(result, np.ndarray):
+            self.equalization_applied.emit(op_name, result)
+
+    def _on_hist_error(self, error_msg: str):
+        import logging
+        logging.getLogger('ciaw').error(f"Hist EQ worker error: {error_msg}")
+        show_error_dialog("Equalization Error", error_msg)
 
     def update_roi(self, image: np.ndarray, roi: QRect):
         try:
             validate_grayscale(image)
-            from processing.noise.roi_stats import extract_roi
-            from processing.histogram.histogram_utils import compute_histogram
-            roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
-            if roi_pixels.size == 0:
+
+            x1 = max(0, roi.x())
+            y1 = max(0, roi.y())
+            x2 = min(image.shape[1], roi.x() + roi.width())
+            y2 = min(image.shape[0], roi.y() + roi.height())
+
+            if x2 <= x1 or y2 <= y1:
                 return
-            hist = compute_histogram(roi_pixels)
+
+            roi_pixels = image[y1:y2, x1:x2]
+
+            try:
+                from processing.histogram import compute_histogram
+                hist = compute_histogram(roi_pixels)
+            except ImportError:
+                import logging
+                logging.getLogger('ciaw').error("compute_histogram not ready")
+                return
+
             self._canvas.set_histogram(hist)
-            self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
-            self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
-            self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
-            self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
-        except ImportError as e:
-            import logging
-            logging.getLogger('ciaw').error(f"ROI histogram not ready: {e}")
-            return
+            flat = roi_pixels.flatten().astype(np.float64)
+            self._stat_labels["mean"].setText(f"{flat.mean():.2f}")
+            self._stat_labels["var"].setText(f"{flat.var():.2f}")
+            self._stat_labels["min"].setText(f"{int(flat.min())}")
+            self._stat_labels["max"].setText(f"{int(flat.max())}")
+
         except Exception as e:
             import logging
             logging.getLogger('ciaw').error(f"update_roi error: {e}")
-            return
