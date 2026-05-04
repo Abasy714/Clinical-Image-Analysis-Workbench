@@ -8,8 +8,7 @@ import logging
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
                               QPushButton, QScrollArea, QRubberBand, QSizePolicy, QFrame)
-from PyQt6.QtCore import Qt, QRect, QPoint, QSize, pyqtSignal, QEvent, QThread
-from PyQt6.QtGui import QPainter, QPen, QColor
+from PyQt6.QtCore import Qt, QRect, QPoint, QSize, pyqtSignal, QEvent, QThread, QTimer
 
 from gui.styles import (BG, PANEL, BORDER, BORDER2, ACCENT, MUTED, MUTED2, btn_style)
 from utils import (to_qpixmap, normalize_to_uint8, wrap_errors,)
@@ -33,40 +32,7 @@ class ZoomWorker(QThread):
 
 
 class _ImageLabel(QLabel):
-    """QLabel that paints a semi-transparent histogram waveform on top of the image."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._histogram: np.ndarray | None = None
-        self._show_overlay: bool = True
-
-    def set_histogram(self, histogram: np.ndarray | None):
-        self._histogram = histogram
-        self.update()
-
-    def set_show_overlay(self, visible: bool):
-        self._show_overlay = visible
-        self.update()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if not self._show_overlay or self._histogram is None or len(self._histogram) == 0:
-            return
-        painter = QPainter(self)
-        w, h = self.width(), self.height()
-        overlay_h = max(40, h // 6)
-        y_base = h - 4
-        hist_max = float(self._histogram.max()) or 1.0
-        n = len(self._histogram)
-        painter.setOpacity(0.55)
-        pen = QPen(QColor(ACCENT))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        for i, val in enumerate(self._histogram):
-            bar_h = int(val / hist_max * overlay_h)
-            x = int(i / n * w)
-            painter.drawLine(x, y_base, x, y_base - bar_h)
-        painter.end()
+    """QLabel used for displaying the current image."""
 
 
 def _sep() -> QWidget:
@@ -77,6 +43,9 @@ def _sep() -> QWidget:
 
 
 class ImageViewer(QWidget):
+    _MIN_ZOOM = 1
+    _MAX_ZOOM = 1000
+
     roi_selected = pyqtSignal(QRect)
     zoom_changed = pyqtSignal(int)
     coords_changed = pyqtSignal(int, int)
@@ -89,10 +58,10 @@ class ImageViewer(QWidget):
         self._before_image: np.ndarray | None = None
         self._showing_before: bool = False
         self._zoom: int = 100
+        self._fit_to_window: bool = True
         self._interp_mode: str = 'nearest'
         self._roi: QRect | None = None
         self._origin: QPoint = QPoint()
-        self._show_hist_overlay: bool = True
 
         self.setStyleSheet(f"background:{BG};")
         layout = QVBoxLayout(self)
@@ -128,7 +97,7 @@ class ImageViewer(QWidget):
         self._btn_fit = QPushButton("Fit")
         self._btn_fit.setFixedHeight(24)
         self._btn_fit.setStyleSheet(btn_style('ghost'))
-        self._btn_fit.clicked.connect(self.zoom_fit)
+        self._btn_fit.clicked.connect(self.fit_to_window)
         tl.addWidget(self._btn_fit)
 
         tl.addWidget(_sep())
@@ -138,14 +107,6 @@ class ImageViewer(QWidget):
         self._btn_interp.setStyleSheet(btn_style())
         self._btn_interp.clicked.connect(self._toggle_interp)
         tl.addWidget(self._btn_interp)
-
-        tl.addWidget(_sep())
-
-        self._btn_overlay = QPushButton("Hist ✓")
-        self._btn_overlay.setFixedHeight(24)
-        self._btn_overlay.setStyleSheet(btn_style())
-        self._btn_overlay.clicked.connect(self._toggle_overlay)
-        tl.addWidget(self._btn_overlay)
 
         tl.addWidget(_sep())
 
@@ -260,7 +221,7 @@ class ImageViewer(QWidget):
 
     # ------------------------------------------------------------------ public API
 
-    def set_image(self, image: np.ndarray):
+    def set_image(self, image: np.ndarray, fit_to_window: bool = False):
         if image is None or not isinstance(image, np.ndarray):
             return
         img = image.copy()
@@ -272,12 +233,16 @@ class ImageViewer(QWidget):
 
         # Reset before/after state to "after"
         self._showing_before = False
+        self._fit_to_window = fit_to_window
         self._after_btn.setChecked(True)
         self._before_btn.setChecked(False)
         self._before_badge.hide()
 
-        # Render with the current zoom; zoom is display-only and never mutates _image.
-        self._render()
+        if fit_to_window:
+            # Wait one event loop so the scroll viewport has its final size.
+            QTimer.singleShot(0, self.fit_to_window)
+        else:
+            self._render()
 
     def set_before_image(self, image: np.ndarray):
         """Store the before/original image for before-after comparison."""
@@ -295,13 +260,20 @@ class ImageViewer(QWidget):
         self._before_image = img
 
     def zoom_in(self):
-        self._set_zoom(self._zoom + 10)
+        self._set_zoom(self._zoom + 10, fit_mode=False)
 
     def zoom_out(self):
-        self._set_zoom(self._zoom - 10)
+        self._set_zoom(self._zoom - 10, fit_mode=False)
 
     def zoom_fit(self):
-        self._set_zoom(100)
+        self.fit_to_window()
+
+    def fit_to_window(self):
+        base = self._get_display_base()
+        if base is None:
+            return
+        self._fit_to_window = True
+        self._set_zoom(self._compute_fit_zoom(base), fit_mode=True)
 
     def set_interpolation_mode(self, mode: str):
         if mode in ('nearest', 'bilinear'):
@@ -319,9 +291,6 @@ class ImageViewer(QWidget):
             self._overlay.show()
         else:
             self._overlay.hide()
-
-    def set_histogram_overlay(self, histogram: np.ndarray):
-        self._img_label.set_histogram(histogram)
 
     def toggle_before_after(self):
         """Toggle between before and after — bound to B shortcut."""
@@ -342,6 +311,11 @@ class ImageViewer(QWidget):
             elif t == QEvent.Type.MouseButtonRelease:
                 self.mouseReleaseEvent(event)
         return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._fit_to_window and self._image is not None:
+            QTimer.singleShot(0, self.fit_to_window)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -456,9 +430,23 @@ class ImageViewer(QWidget):
             if self._image is not None:
                 self._render()
 
-    def _set_zoom(self, zoom_percent: int):
-        self._zoom = max(10, min(int(zoom_percent), 1000))
+    def _set_zoom(self, zoom_percent: int, fit_mode: bool = False):
+        self._fit_to_window = fit_mode
+        self._zoom = max(self._MIN_ZOOM, min(int(zoom_percent), self._MAX_ZOOM))
         self._render()
+
+    def _compute_fit_zoom(self, image: np.ndarray) -> int:
+        h, w = image.shape[:2]
+        if h <= 0 or w <= 0:
+            return 100
+
+        viewport = self._scroll.viewport().size()
+        view_w = max(1, viewport.width() - 2)
+        view_h = max(1, viewport.height() - 2)
+
+        scale = min(view_w / w, view_h / h)
+        zoom = int(scale * 100)
+        return max(self._MIN_ZOOM, min(zoom, self._MAX_ZOOM))
 
     def _get_display_base(self) -> np.ndarray | None:
         if self._showing_before and self._before_image is not None:
@@ -490,7 +478,3 @@ class ImageViewer(QWidget):
             self._btn_interp.setText("NN")
             self.interp_changed.emit('NN')
 
-    def _toggle_overlay(self):
-        self._show_hist_overlay = not self._show_hist_overlay
-        self._img_label.set_show_overlay(self._show_hist_overlay)
-        self._btn_overlay.setText("Hist ✓" if self._show_hist_overlay else "Hist")

@@ -39,7 +39,6 @@ ENV/
 processing/deep_learning/weights/
 
 # ── Medical data ─────────────────────────────────────────────────────────────
-*.dcm
 *.nii
 *.nii.gz
 

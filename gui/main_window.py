@@ -332,7 +332,7 @@ class MainWindow(QMainWindow):
             show_error_dialog("Load failed", f"Could not load: {filepath}")
             return
         self.pipeline.set_original(image)
-        self._image_viewer.set_image(image)
+        self._image_viewer.set_image(image, fit_to_window=True)
         if hasattr(self._image_viewer, 'set_before_image'):
             self._image_viewer.set_before_image(image)
         self._metadata_panel.update_metadata(metadata)
@@ -479,7 +479,7 @@ class MainWindow(QMainWindow):
 
     def _do_reset(self):
         image = self.pipeline.reset()
-        self._image_viewer.set_image(image)
+        self._image_viewer.set_image(image, fit_to_window=True)
         if hasattr(self._image_viewer, 'set_before_image'):
             self._image_viewer.set_before_image(image)
         self._pipeline_panel.refresh_stack()
