@@ -9,4 +9,4 @@ from .spatial import (
     combined_magnitude,
     median_filter,
 )
-from .interpolation import nearest_neighbor_resize
+from .interpolation import nearest_neighbor_resize, bilinear_resize, bilinear_sample, apply_zoom

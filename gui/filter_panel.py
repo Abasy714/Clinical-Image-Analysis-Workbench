@@ -10,13 +10,32 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
                               QLabel, QPushButton, QDoubleSpinBox, QDialog,
                               QGridLayout, QLineEdit, QScrollArea, QButtonGroup,
                               QRadioButton, QFrame, QSizePolicy)
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QThread
 from PyQt6.QtGui import QColor
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, ACCENT2, ACCENT_DIM, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, COMBO_SS, SPINBOX_SS, APPLY_BTN_SS)
 from utils import (validate_grayscale, normalize_to_uint8, wrap_errors, show_error_dialog,)
+
+
+class FilterWorker(QThread):
+    """Runs a filter function in a background thread."""
+    finished = pyqtSignal(str, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, fn, op_name: str, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+        self._op_name = op_name
+
+    def run(self):
+        try:
+            result = self._fn()
+            self.finished.emit(self._op_name, result)
+        except Exception as e:
+            import traceback
+            self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class FilterPanel(QWidget):
@@ -319,38 +338,69 @@ class FilterPanel(QWidget):
             ft = self._filter_combo.currentText()
             sz = self._get_current_kernel_size()
             sigma = self._sigma_spin.value()
-
-            if ft == "Average":
-                from processing.spatial import average_filter
-                result = average_filter(image, sz)
-                op_name = f"Average {sz}×{sz}"
-            elif ft == "Gaussian":
-                from processing.spatial import gaussian_filter
-                result = gaussian_filter(image, sz, sigma)
-                op_name = f"Gaussian {sz}×{sz} σ={sigma:.1f}"
-            elif ft == "Sobel":
-                from processing.spatial import sobel
-                gx, gy, mag = sobel(image)
-                label = self._get_edge_output()
-                result = {"H": gx, "V": gy, "Mag": mag}.get(label, mag)
-                op_name = f"Sobel-{label}"
-            elif ft == "Prewitt":
-                from processing.spatial import prewitt
-                gx, gy, mag = prewitt(image)
-                label = self._get_edge_output()
-                result = {"H": gx, "V": gy, "Mag": mag}.get(label, mag)
-                op_name = f"Prewitt-{label}"
-            elif ft == "Median":
-                from processing.spatial import median_filter
-                result = median_filter(image, sz)
-                op_name = f"Median {sz}×{sz}"
-            else:
-                return
-
-            result = normalize_to_uint8(result)
-            self.filter_applied.emit(op_name, result)
         except Exception as e:
             show_error_dialog("Filter Error", str(e))
+            return
+
+        _image = image.copy()
+        _sz = sz
+
+        if ft == "Average":
+            def _fn():
+                from processing.spatial import average_filter
+                from utils import normalize_to_uint8 as _n
+                return _n(average_filter(_image, _sz))
+            _op = f"Average {_sz}×{_sz}"
+
+        elif ft == "Gaussian":
+            _sigma = float(sigma)
+            def _fn():
+                from processing.spatial import gaussian_filter
+                from utils import normalize_to_uint8 as _n
+                return _n(gaussian_filter(_image, _sz, _sigma))
+            _op = f"Gaussian {_sz}×{_sz} σ={_sigma:.1f}"
+
+        elif ft == "Sobel":
+            _edge = self._get_edge_output()
+            def _fn():
+                from processing.spatial import sobel
+                from utils import normalize_to_uint8 as _n
+                gx, gy, mag = sobel(_image)
+                return _n({"H": gx, "V": gy}.get(_edge, mag))
+            _op = f"Sobel-{_edge}"
+
+        elif ft == "Prewitt":
+            _edge = self._get_edge_output()
+            def _fn():
+                from processing.spatial import prewitt
+                from utils import normalize_to_uint8 as _n
+                gx, gy, mag = prewitt(_image)
+                return _n({"H": gx, "V": gy}.get(_edge, mag))
+            _op = f"Prewitt-{_edge}"
+
+        elif ft == "Median":
+            def _fn():
+                from processing.spatial import median_filter
+                from utils import normalize_to_uint8 as _n
+                return _n(median_filter(_image, _sz))
+            _op = f"Median {_sz}×{_sz}"
+
+        else:
+            return
+
+        self._worker = FilterWorker(_fn, _op, parent=self)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.error.connect(self._on_worker_error)
+        self._worker.start()
+
+    def _on_worker_finished(self, op_name: str, result):
+        if result is not None and isinstance(result, np.ndarray):
+            self.filter_applied.emit(op_name, result)
+
+    def _on_worker_error(self, error_msg: str):
+        import logging
+        logging.getLogger('ciaw').error(f"Filter worker error: {error_msg}")
+        show_error_dialog("Filter Error", error_msg)
 
     @wrap_errors
     def open_kernel_modal(self, image: np.ndarray):

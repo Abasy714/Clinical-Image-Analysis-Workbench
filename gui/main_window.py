@@ -363,8 +363,7 @@ class MainWindow(QMainWindow):
         mem_kb = result.nbytes // 1024
         self._sb_mem.setText(f"MEM: {mem_kb}KB")
 
-        self._image_viewer.show_processing_overlay(True)
-        QTimer.singleShot(400, lambda: self._image_viewer.show_processing_overlay(False))
+        self._image_viewer.show_processing_overlay(False)
 
         self.logger.info("Operation applied: %s", op_name)
 
@@ -385,7 +384,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ panel dispatch
 
     def _on_filter_apply(self):
-        self._filter_panel.on_apply_clicked(self.pipeline.current())
+        image = self.pipeline.current()
+        if image is None:
+            return
+        self._image_viewer.show_processing_overlay(True)
+        self._filter_panel.on_apply_clicked(image)
 
     def _on_kernel_modal(self):
         self._filter_panel.open_kernel_modal(self.pipeline.current())
@@ -394,10 +397,29 @@ class MainWindow(QMainWindow):
         self._hist_panel.on_apply_clicked(self.pipeline.current())
 
     def _on_roi_selected(self, roi):
-        image = self.pipeline.current()
-        self._hist_panel.update_roi(image, roi)
-        self._noise_panel.update_roi_stats(image, roi)
-        self._sb_roi.setText(f"ROI: {roi.width()}×{roi.height()}")
+        try:
+            if roi is not None and roi.width() > 0 and roi.height() > 0:
+                self._sb_roi.setText(f"ROI: {roi.width()}×{roi.height()}")
+
+            image = self.pipeline.current()
+            if image is None:
+                return
+
+            try:
+                self._hist_panel.update_roi(image, roi)
+            except Exception as e:
+                import logging
+                logging.getLogger('ciaw').error(f"histogram ROI not ready: {e}")
+
+            try:
+                self._noise_panel.update_roi_stats(image, roi)
+            except Exception as e:
+                import logging
+                logging.getLogger('ciaw').error(f"noise ROI stats not ready: {e}")
+
+        except Exception as e:
+            import logging
+            logging.getLogger('ciaw').error(f"_on_roi_selected error: {e}")
 
     def _do_undo(self):
         image = self.pipeline.undo()

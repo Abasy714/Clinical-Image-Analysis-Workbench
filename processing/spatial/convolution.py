@@ -73,12 +73,16 @@ def convolve2d(image: np.ndarray, kernel: np.ndarray,
     pad_w = k_w // 2
 
     padded = _pad_image(image, pad_h, pad_w, padding)
-    output = np.zeros((img_h, img_w), dtype=np.float64)
 
-    # slide kernel over every output pixel
-    for row in range(img_h):
-        for col in range(img_w):
-            region = padded[row: row + k_h, col: col + k_w]
-            output[row, col] = np.sum(region * kernel_flipped)
-
+    # Vectorized sliding window — replaces O(H*W) Python loop
+    from numpy.lib.stride_tricks import as_strided
+    shape = (img_h, img_w, k_h, k_w)
+    strides = (
+        padded.strides[0],
+        padded.strides[1],
+        padded.strides[0],
+        padded.strides[1],
+    )
+    patches = as_strided(padded, shape=shape, strides=strides)
+    output = np.einsum('ijkl,kl->ij', patches, kernel_flipped)
     return output

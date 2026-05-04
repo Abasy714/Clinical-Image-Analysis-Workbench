@@ -79,19 +79,38 @@ def bilinear_resize(image: np.ndarray, new_h: int, new_w: int) -> np.ndarray:
 	Returns:
 		Resized image as uint8.
 	"""
-	old_h, old_w = image.shape
+	h, w = image.shape
 	if new_h <= 0 or new_w <= 0:
 		raise ValueError("new_h and new_w must be positive")
+	image = image.astype(np.float64)
 
-	scale_y = old_h / new_h
-	scale_x = old_w / new_w
+	# Vectorized coordinate grid — replaces O(H*W) Python loop
+	row_coords = (np.arange(new_h) + 0.5) * (h / new_h) - 0.5
+	col_coords = (np.arange(new_w) + 0.5) * (w / new_w) - 0.5
 
-	output = np.empty((new_h, new_w), dtype=np.float64)
+	r0 = np.floor(row_coords).astype(np.int32)
+	c0 = np.floor(col_coords).astype(np.int32)
+	r1 = r0 + 1
+	c1 = c0 + 1
 
-	for i in range(new_h):
-		src_y = i * scale_y
-		for j in range(new_w):
-			src_x = j * scale_x
-			output[i, j] = bilinear_sample(image, src_y, src_x)
+	r0 = np.clip(r0, 0, h - 1)
+	r1 = np.clip(r1, 0, h - 1)
+	c0 = np.clip(c0, 0, w - 1)
+	c1 = np.clip(c1, 0, w - 1)
+
+	dr = (row_coords - np.floor(row_coords))[:, np.newaxis]  # (new_h, 1)
+	dc = (col_coords - np.floor(col_coords))[np.newaxis, :]  # (1, new_w)
+
+	top_left     = image[np.ix_(r0, c0)]
+	top_right    = image[np.ix_(r0, c1)]
+	bottom_left  = image[np.ix_(r1, c0)]
+	bottom_right = image[np.ix_(r1, c1)]
+
+	output = (
+		top_left     * (1 - dr) * (1 - dc) +
+		top_right    * (1 - dr) * dc +
+		bottom_left  * dr       * (1 - dc) +
+		bottom_right * dr       * dc
+	)
 
 	return np.clip(output, 0, 255).astype(np.uint8)
