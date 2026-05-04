@@ -20,7 +20,7 @@ SUPPORTED_EXTENSIONS = ['.dcm', '.jpg', '.jpeg', '.bmp']
 
 @wrap_errors
 def load_image(filepath: str) -> tuple:
-    ext = os.path.splitext(filepath)[1].lower()
+    ext = os.path.splitext(filepath)[1].lower() #extracts the file extension and converts to lowercase for case-insensitive comparison
     if ext not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported format: {ext}")
     if ext == '.dcm':
