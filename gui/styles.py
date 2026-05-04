@@ -17,6 +17,139 @@ MUTED      = "#6b6f65"
 MUTED2     = "#4a4d46"
 WHITE      = "#f4f6f0"
 
+HEADER_SS = """
+    QLabel {
+        color: #c8f135;
+        font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        font-size: 9px;
+        font-weight: bold;
+        letter-spacing: 2px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid #2c2e2a;
+    }
+"""
+
+FIELD_SS = """
+    QLabel {
+        color: #6b6f65;
+        font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        font-size: 9px;
+        letter-spacing: 1px;
+        padding-top: 4px;
+    }
+"""
+
+COMBO_SS = """
+    QComboBox {
+        background: #252623;
+        color: #eceee8;
+        border: 1px solid #353730;
+        border-radius: 2px;
+        padding: 5px 10px;
+        font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        font-size: 11px;
+        min-height: 28px;
+    }
+    QComboBox:focus {
+        border-color: #c8f135;
+    }
+    QComboBox::drop-down {
+        border: none;
+        width: 24px;
+        padding-right: 6px;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        border-left: 4px solid transparent;
+        border-right: 4px solid transparent;
+        border-top: 5px solid #6b6f65;
+        width: 0;
+        height: 0;
+        margin-right: 6px;
+    }
+    QComboBox QAbstractItemView {
+        background: #181917;
+        border: 1px solid #353730;
+        color: #eceee8;
+        selection-background-color: #1a2208;
+        selection-color: #c8f135;
+        padding: 2px;
+        outline: none;
+    }
+    QComboBox QAbstractItemView::item {
+        padding: 5px 10px;
+        min-height: 24px;
+    }
+    QComboBox QAbstractItemView::item:hover {
+        background: #252623;
+    }
+"""
+
+SPINBOX_SS = """
+    QDoubleSpinBox, QSpinBox {
+        background: #252623;
+        color: #eceee8;
+        border: 1px solid #353730;
+        border-radius: 2px;
+        padding: 4px 8px;
+        font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        font-size: 11px;
+        min-height: 26px;
+    }
+    QDoubleSpinBox:focus, QSpinBox:focus {
+        border-color: #c8f135;
+    }
+    QDoubleSpinBox::up-button, QSpinBox::up-button,
+    QDoubleSpinBox::down-button, QSpinBox::down-button {
+        background: #353730;
+        border: none;
+        width: 16px;
+    }
+    QDoubleSpinBox::up-button:hover, QSpinBox::up-button:hover,
+    QDoubleSpinBox::down-button:hover, QSpinBox::down-button:hover {
+        background: #484b44;
+    }
+    QDoubleSpinBox::up-arrow, QSpinBox::up-arrow {
+        border-left: 3px solid transparent;
+        border-right: 3px solid transparent;
+        border-bottom: 4px solid #6b6f65;
+        width: 0; height: 0;
+    }
+    QDoubleSpinBox::down-arrow, QSpinBox::down-arrow {
+        border-left: 3px solid transparent;
+        border-right: 3px solid transparent;
+        border-top: 4px solid #6b6f65;
+        width: 0; height: 0;
+    }
+"""
+
+APPLY_BTN_SS = """
+    QPushButton {
+        background: #c8f135;
+        color: #0d1002;
+        border: 1px solid #a8d420;
+        border-radius: 2px;
+        padding: 10px;
+        font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+        font-size: 11px;
+        font-weight: bold;
+        letter-spacing: 1px;
+        min-height: 36px;
+    }
+    QPushButton:hover {
+        background: #a8d420;
+        border-color: #8ab810;
+    }
+    QPushButton:pressed {
+        background: #8ab810;
+    }
+    QPushButton:disabled {
+        background: #2c2e2a;
+        color: #4a4d46;
+        border-color: #2c2e2a;
+    }
+"""
+
 MAIN_STYLE = """
 QMainWindow, QWidget {
     background-color: #111210;

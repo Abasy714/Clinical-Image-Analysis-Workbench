@@ -4,33 +4,6 @@ Frequency domain panel for periodic noise removal via interactive notch filterin
 Displays the log-scaled FFT magnitude spectrum and allows the user to click on noise spikes.
 """
 
-# PyQt6.QtWidgets — QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QComboBox, QSpinBox, QLabel
-# PyQt6.QtCore — pyqtSignal, QPoint
-# matplotlib.backends.backend_qtagg — FigureCanvasQTAgg
-# matplotlib.figure — Figure
-# numpy — spectrum data handling
-# processing.frequency.spectrum — compute_spectrum, spectrum_to_display
-# processing.frequency.notch_filter — create_notch_filter, apply_notch_filter
-
-# FUNCTIONS / CLASSES
-# class FourierPanel(QWidget):
-#   def __init__: build UI — spectrum canvas, filter shape selector, radius spinner, apply button
-#   def set_image: compute and display spectrum for loaded image
-#   def on_spectrum_clicked: capture (u,v) click → generate notch + conjugate → preview mask on spectrum
-#   def on_apply_clicked: multiply mask with FFT → IFFT → emit cleaned image
-#   def _display_spectrum: render log-magnitude to matplotlib canvas
-# signal: notch_applied(np.ndarray)
-
-# --- UTIL USAGE GUIDE ---
-# from utils.image_utils import validate_grayscale, normalize_to_uint8
-# from utils.error_handler import wrap_errors
-#
-# validate_grayscale(image)           # call in set_image before computing spectrum
-# normalize_to_uint8(cleaned)         # call on ifft result before emitting notch_applied
-# @wrap_errors                        # decorate on_spectrum_clicked and on_apply_clicked
-# Note: spectrum_to_display() from processing.frequency.spectrum handles its own normalization
-#       only call normalize_to_uint8 on the final reconstructed spatial-domain image
-
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                               QLabel, QSpinBox, QButtonGroup, QRadioButton,
@@ -39,7 +12,8 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QImage
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, RED, TEXT, MUTED, MUTED2, btn_style)
+                        ACCENT, RED, TEXT, MUTED, MUTED2, btn_style,
+                        HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS)
 from utils import (validate_grayscale, normalize_to_uint8, to_qpixmap, wrap_errors,)
 
 
@@ -136,7 +110,7 @@ class FourierPanel(QWidget):
         layout.setSpacing(8)
 
         hdr = QLabel("FREQUENCY / NOTCH FILTER")
-        hdr.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;letter-spacing:.15em;")
+        hdr.setStyleSheet(HEADER_SS)
         layout.addWidget(hdr)
 
         # spectrum canvas
@@ -151,7 +125,7 @@ class FourierPanel(QWidget):
 
         # filter shape
         shape_lbl = QLabel("Filter shape")
-        shape_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        shape_lbl.setStyleSheet(FIELD_SS)
         layout.addWidget(shape_lbl)
 
         shape_row = QWidget()
@@ -174,21 +148,25 @@ class FourierPanel(QWidget):
         prl.setContentsMargins(0, 0, 0, 0)
         prl.setSpacing(8)
 
-        prl.addWidget(QLabel("D₀", styleSheet=f"color:{MUTED};font-size:9px;"))
+        d0_lbl = QLabel("D₀")
+        d0_lbl.setStyleSheet(FIELD_SS)
+        prl.addWidget(d0_lbl)
         self._radius_spin = QSpinBox()
         self._radius_spin.setRange(1, 200)
         self._radius_spin.setValue(10)
         self._radius_spin.setFixedWidth(60)
+        self._radius_spin.setStyleSheet(SPINBOX_SS)
         prl.addWidget(self._radius_spin)
 
         self._order_lbl = QLabel("n")
-        self._order_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        self._order_lbl.setStyleSheet(FIELD_SS)
         prl.addWidget(self._order_lbl)
         self._order_spin = QSpinBox()
         self._order_spin.setRange(1, 10)
         self._order_spin.setValue(2)
         self._order_spin.setFixedWidth(50)
         self._order_spin.setEnabled(False)
+        self._order_spin.setStyleSheet(SPINBOX_SS)
         prl.addWidget(self._order_spin)
         prl.addStretch()
         layout.addWidget(params_row)
@@ -208,7 +186,7 @@ class FourierPanel(QWidget):
 
         # apply button
         self.apply_btn = QPushButton("Apply Notch Filter")
-        self.apply_btn.setStyleSheet(btn_style('primary'))
+        self.apply_btn.setStyleSheet(APPLY_BTN_SS)
         layout.addWidget(self.apply_btn)
 
         layout.addStretch()
