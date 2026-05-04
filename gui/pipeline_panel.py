@@ -4,29 +4,6 @@ Pipeline management panel for sequential image enhancement operations.
 Provides undo last step and reset to original buttons, and displays the current op stack.
 """
 
-# PyQt6.QtWidgets — QWidget, QVBoxLayout, QListWidget, QPushButton, QLabel
-# PyQt6.QtCore — pyqtSignal
-# utils.pipeline_state — PipelineState
-
-# FUNCTIONS / CLASSES
-# class PipelinePanel(QWidget):
-#   def __init__: build UI — op history list, undo button, reset button
-#   def refresh_stack: read PipelineState and repopulate the list widget
-#   def on_undo_clicked: call pipeline_state.undo → emit current image
-#   def on_reset_clicked: call pipeline_state.reset → emit original image
-# signal: pipeline_changed(np.ndarray) — emits the image after undo or reset
-
-# --- UTIL USAGE GUIDE ---
-# from utils.pipeline_state import PipelineState
-# from utils.image_utils import to_qpixmap
-# from utils.error_handler import wrap_errors
-#
-# pipeline.undo()                     # call inside on_undo_clicked — returns previous image
-# pipeline.reset()                    # call inside on_reset_clicked — returns original image
-# pipeline.get_stack_names()          # call inside refresh_stack to populate the list widget
-# to_qpixmap(image)                   # call on the returned image before emitting pipeline_changed
-# @wrap_errors                        # decorate on_undo_clicked and on_reset_clicked
-
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget,
                               QListWidgetItem, QPushButton, QLabel, QFrame,
                               QGridLayout, QSizePolicy)
@@ -34,7 +11,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, ACCENT_DIM, TEXT, MUTED, MUTED2, btn_style)
+                        ACCENT, ACCENT_DIM, TEXT, MUTED, MUTED2, btn_style,
+                        HEADER_SS)
 from utils import wrap_errors
 
 
@@ -76,9 +54,7 @@ class PipelinePanel(QWidget):
         ckpt_layout.setSpacing(4)
 
         slot_lbl = QLabel("CHECKPOINTS")
-        slot_lbl.setStyleSheet(
-            f"color: {MUTED}; font-size: 8px; font-weight: bold; letter-spacing: 0.12em;"
-        )
+        slot_lbl.setStyleSheet(HEADER_SS)
         ckpt_layout.addWidget(slot_lbl, 0, 0, 1, 2)
 
         positions = [(1, 0), (1, 1), (2, 0), (2, 1)]
@@ -115,7 +91,9 @@ class PipelinePanel(QWidget):
         stack_hdr.setStyleSheet(f"background: {PANEL};")
         shl = QHBoxLayout(stack_hdr)
         shl.setContentsMargins(10, 6, 8, 4)
-        shl.addWidget(QLabel("OP STACK", styleSheet=f"color:{MUTED};font-size:8px;font-weight:bold;letter-spacing:.12em;"))
+        op_stack_lbl = QLabel("OP STACK")
+        op_stack_lbl.setStyleSheet(HEADER_SS)
+        shl.addWidget(op_stack_lbl)
         shl.addStretch()
         self._count_badge = QLabel("0")
         self._count_badge.setStyleSheet(
@@ -125,11 +103,34 @@ class PipelinePanel(QWidget):
         layout.addWidget(stack_hdr)
 
         self._stack_list = QListWidget()
-        self._stack_list.setStyleSheet(
-            f"QListWidget{{background:{BG};border:none;color:{TEXT};}}"
-            f"QListWidget::item{{padding:4px 8px;border-bottom:1px solid {BORDER};font-size:10px;}}"
-            f"QListWidget::item:selected{{background:#1a2208;color:{ACCENT};}}"
-        )
+        self._stack_list.setStyleSheet("""
+            QListWidget {
+                background: #111210;
+                border: none;
+                outline: none;
+                padding: 2px;
+            }
+            QListWidget::item {
+                background: #1e1f1d;
+                color: #eceee8;
+                border: 1px solid #2c2e2a;
+                border-radius: 2px;
+                padding: 6px 8px;
+                margin-bottom: 2px;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 10px;
+            }
+            QListWidget::item:selected {
+                background: #1a2208;
+                color: #c8f135;
+                border-color: #6a8a10;
+                border-left: 2px solid #c8f135;
+            }
+            QListWidget::item:hover:!selected {
+                background: #252623;
+                border-color: #353730;
+            }
+        """)
         self._stack_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._stack_list)
 
@@ -140,27 +141,68 @@ class PipelinePanel(QWidget):
         brl.setContentsMargins(8, 6, 8, 8)
         brl.setSpacing(6)
         self._undo_btn = QPushButton("↩  Undo")
-        self._undo_btn.setStyleSheet(btn_style('danger'))
+        self._undo_btn.setStyleSheet("""
+            QPushButton {
+                background: #2d1210;
+                color: #ff4d3a;
+                border: 1px solid #5a1f1a;
+                border-radius: 2px;
+                padding: 6px 10px;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 10px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }
+            QPushButton:hover { background: #3d1815; border-color: #7a2a24; }
+            QPushButton:pressed { background: #1e0c0b; }
+        """)
         self._undo_btn.clicked.connect(self.undo_requested)
         brl.addWidget(self._undo_btn)
         self._reset_btn = QPushButton("⟳  Reset")
-        self._reset_btn.setStyleSheet(btn_style('ghost'))
+        self._reset_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #6b6f65;
+                border: 1px solid #353730;
+                border-radius: 2px;
+                padding: 6px 10px;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 10px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }
+            QPushButton:hover { color: #eceee8; border-color: #484b44; background: #252623; }
+            QPushButton:pressed { background: #1e1f1d; }
+        """)
         self._reset_btn.clicked.connect(self.reset_requested)
         brl.addWidget(self._reset_btn)
         layout.addWidget(btn_row)
 
     def _style_slot(self, frame: QFrame, label: QLabel, saved: bool, name: str = ""):
         if saved:
-            frame.setStyleSheet(
-                f"QFrame{{background:#0f1f05;border:1px solid {ACCENT_DIM};border-radius:2px;}}"
-            )
-            label.setStyleSheet(f"color:{ACCENT};font-size:9px;font-style:normal;font-weight:bold;")
+            frame.setStyleSheet("""
+                QFrame {
+                    background: #171a10;
+                    border: 1px solid #6a8a10;
+                    border-radius: 2px;
+                }
+                QFrame:hover {
+                    border-color: #c8f135;
+                }
+            """)
+            label.setStyleSheet("color: #c8f135; font-size: 9px; font-weight: bold; letter-spacing: 1px;")
         else:
-            frame.setStyleSheet(
-                f"QFrame{{background:{INPUT};border:1px solid {BORDER};border-radius:2px;}}"
-                f"QFrame:hover{{border-color:{BORDER2};}}"
-            )
-            label.setStyleSheet(f"color:{MUTED2};font-size:9px;font-style:italic;")
+            frame.setStyleSheet("""
+                QFrame {
+                    background: #1e1f1d;
+                    border: 1px solid #2c2e2a;
+                    border-radius: 2px;
+                }
+                QFrame:hover {
+                    border-color: #353730;
+                }
+            """)
+            label.setStyleSheet("color: #4a4d46; font-size: 9px; font-style: italic;")
 
     def _make_slot_click(self, slot: str):
         def handler(event):

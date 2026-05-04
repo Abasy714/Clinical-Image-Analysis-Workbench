@@ -4,29 +4,6 @@ Panel for synthetic noise injection and ROI-based statistical analysis.
 Allows the user to inject Gaussian or uniform noise and view local statistics of a drawn ROI.
 """
 
-# PyQt6.QtWidgets — QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QDoubleSpinBox, QPushButton, QLabel, QGroupBox
-# PyQt6.QtCore — pyqtSignal
-# matplotlib.backends.backend_qtagg — FigureCanvasQTAgg
-# matplotlib.figure — Figure
-# processing.noise.noise_injection — add_gaussian_noise, add_uniform_noise
-# processing.noise.roi_stats — compute_roi_stats
-# utils.image_utils — validate_grayscale
-
-# FUNCTIONS / CLASSES
-# class NoisePanel(QWidget):
-#   def __init__: build UI — noise type selector, parameter inputs, inject button, stats display area
-#   def on_inject_clicked: call noise injection function → emit noisy image
-#   def update_roi_stats: receive ROI → call compute_roi_stats → display mean, variance, histogram
-# signal: noise_applied(np.ndarray)
-
-# --- UTIL USAGE GUIDE ---
-# from utils.image_utils import validate_grayscale, normalize_to_uint8
-# from utils.error_handler import wrap_errors
-#
-# validate_grayscale(image)           # call before noise injection and before ROI stats
-# normalize_to_uint8(noisy)           # call on noise output before emitting noise_applied
-# @wrap_errors                        # decorate on_inject_clicked and update_roi_stats
-
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                               QComboBox, QDoubleSpinBox, QLabel, QFrame,
@@ -35,7 +12,8 @@ from PyQt6.QtCore import pyqtSignal, Qt, QRect
 from PyQt6.QtGui import QPainter, QColor, QPen
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, TEXT, MUTED, MUTED2, btn_style)
+                        ACCENT, TEXT, MUTED, MUTED2, btn_style,
+                        HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS, COMBO_SS)
 from utils import (validate_grayscale, normalize_to_uint8, wrap_errors,)
 
 
@@ -93,15 +71,16 @@ class NoisePanel(QWidget):
         layout.setSpacing(8)
 
         hdr = QLabel("NOISE INJECTION")
-        hdr.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;letter-spacing:.15em;")
+        hdr.setStyleSheet(HEADER_SS)
         layout.addWidget(hdr)
 
         # noise type
         type_lbl = QLabel("Noise type")
-        type_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        type_lbl.setStyleSheet(FIELD_SS)
         layout.addWidget(type_lbl)
         self._type_combo = QComboBox()
         self._type_combo.addItems(["Gaussian", "Uniform"])
+        self._type_combo.setStyleSheet(COMBO_SS)
         layout.addWidget(self._type_combo)
 
         # Gaussian params
@@ -109,15 +88,21 @@ class NoisePanel(QWidget):
         gl = QGridLayout(self._gauss_w)
         gl.setContentsMargins(0, 0, 0, 0)
         gl.setSpacing(4)
-        gl.addWidget(QLabel("Mean", styleSheet=f"color:{MUTED};font-size:9px;"), 0, 0)
+        mean_lbl = QLabel("Mean")
+        mean_lbl.setStyleSheet(FIELD_SS)
+        gl.addWidget(mean_lbl, 0, 0)
         self._gauss_mean = QDoubleSpinBox()
         self._gauss_mean.setRange(-128.0, 128.0)
         self._gauss_mean.setValue(0.0)
+        self._gauss_mean.setStyleSheet(SPINBOX_SS)
         gl.addWidget(self._gauss_mean, 0, 1)
-        gl.addWidget(QLabel("σ", styleSheet=f"color:{MUTED};font-size:9px;"), 1, 0)
+        sigma_lbl = QLabel("σ")
+        sigma_lbl.setStyleSheet(FIELD_SS)
+        gl.addWidget(sigma_lbl, 1, 0)
         self._gauss_sigma = QDoubleSpinBox()
         self._gauss_sigma.setRange(0.1, 100.0)
         self._gauss_sigma.setValue(25.0)
+        self._gauss_sigma.setStyleSheet(SPINBOX_SS)
         gl.addWidget(self._gauss_sigma, 1, 1)
         layout.addWidget(self._gauss_w)
 
@@ -126,22 +111,28 @@ class NoisePanel(QWidget):
         ul = QGridLayout(self._uniform_w)
         ul.setContentsMargins(0, 0, 0, 0)
         ul.setSpacing(4)
-        ul.addWidget(QLabel("Low", styleSheet=f"color:{MUTED};font-size:9px;"), 0, 0)
+        low_lbl = QLabel("Low")
+        low_lbl.setStyleSheet(FIELD_SS)
+        ul.addWidget(low_lbl, 0, 0)
         self._uniform_low = QDoubleSpinBox()
         self._uniform_low.setRange(-255.0, 0.0)
         self._uniform_low.setValue(-30.0)
+        self._uniform_low.setStyleSheet(SPINBOX_SS)
         ul.addWidget(self._uniform_low, 0, 1)
-        ul.addWidget(QLabel("High", styleSheet=f"color:{MUTED};font-size:9px;"), 1, 0)
+        high_lbl = QLabel("High")
+        high_lbl.setStyleSheet(FIELD_SS)
+        ul.addWidget(high_lbl, 1, 0)
         self._uniform_high = QDoubleSpinBox()
         self._uniform_high.setRange(0.0, 255.0)
         self._uniform_high.setValue(30.0)
+        self._uniform_high.setStyleSheet(SPINBOX_SS)
         ul.addWidget(self._uniform_high, 1, 1)
         self._uniform_w.hide()
         layout.addWidget(self._uniform_w)
 
         # inject button
         self.inject_btn = QPushButton("Inject Noise")
-        self.inject_btn.setStyleSheet(btn_style('primary'))
+        self.inject_btn.setStyleSheet(APPLY_BTN_SS)
         layout.addWidget(self.inject_btn)
 
         self._type_combo.currentTextChanged.connect(self._on_type_changed)
@@ -154,7 +145,7 @@ class NoisePanel(QWidget):
 
         # ROI stats
         roi_lbl = QLabel("ROI STATISTICS")
-        roi_lbl.setStyleSheet(f"color:{MUTED};font-size:8px;font-weight:bold;letter-spacing:.12em;")
+        roi_lbl.setStyleSheet(HEADER_SS)
         layout.addWidget(roi_lbl)
 
         self._hist_canvas = _HistCanvas()

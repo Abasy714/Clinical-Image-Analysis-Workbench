@@ -4,28 +4,6 @@ Control panel for spatial filtering operations.
 Allows the user to select kernel size and apply average, Gaussian, Sobel/Prewitt, or median filters.
 """
 
-# PyQt6.QtWidgets — QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QGroupBox, QLabel, QRadioButton
-# PyQt6.QtCore — pyqtSignal
-# processing.spatial.smoothing — average_filter, gaussian_filter
-# processing.spatial.edge_detection — sobel, prewitt, combined_magnitude
-# processing.spatial.median_filter — median_filter
-# utils.image_utils — validate_grayscale: ensure image is single-channel before filtering
-
-# FUNCTIONS / CLASSES
-# class FilterPanel(QWidget):
-#   def __init__: build UI — filter type selector, kernel size spinner, sigma input (Gaussian only)
-#   def on_apply_clicked: read UI state → dispatch to correct processing function → emit result
-#   def _toggle_sigma_input: show/hide sigma spinner based on selected filter type
-# signal: filter_applied(np.ndarray) — emitted with the filtered image result
-
-# --- UTIL USAGE GUIDE ---
-# from utils.image_utils import validate_grayscale, normalize_to_uint8
-# from utils.error_handler import wrap_errors
-#
-# validate_grayscale(image)           # call at the top of on_apply_clicked before dispatching
-# normalize_to_uint8(result)          # call on the filter output before emitting the signal
-# @wrap_errors                        # decorate on_apply_clicked — kernel ops can raise on bad input
-
 import math
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QComboBox,
@@ -36,7 +14,8 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QColor
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, ACCENT2, ACCENT_DIM, TEXT, MUTED, MUTED2, btn_style)
+                        ACCENT, ACCENT2, ACCENT_DIM, TEXT, MUTED, MUTED2, btn_style,
+                        HEADER_SS, FIELD_SS, COMBO_SS, SPINBOX_SS, APPLY_BTN_SS)
 from utils import (validate_grayscale, normalize_to_uint8, wrap_errors, show_error_dialog,)
 
 
@@ -52,26 +31,30 @@ class FilterPanel(QWidget):
 
         # section label
         hdr = QLabel("SPATIAL FILTER")
-        hdr.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;letter-spacing:.15em;")
+        hdr.setStyleSheet(HEADER_SS)
         layout.addWidget(hdr)
 
         # filter type
         type_lbl = QLabel("Filter type")
-        type_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        type_lbl.setStyleSheet(FIELD_SS)
         layout.addWidget(type_lbl)
         self._filter_combo = QComboBox()
         self._filter_combo.addItems(["Average", "Gaussian", "Sobel", "Prewitt", "Median"])
+        self._filter_combo.setStyleSheet(COMBO_SS)
         layout.addWidget(self._filter_combo)
 
         # sigma (Gaussian only)
         self._sigma_row = QWidget()
         sr = QHBoxLayout(self._sigma_row)
         sr.setContentsMargins(0, 0, 0, 0)
-        sr.addWidget(QLabel("σ", styleSheet=f"color:{MUTED};font-size:9px;"))
+        sigma_lbl = QLabel("σ")
+        sigma_lbl.setStyleSheet(FIELD_SS)
+        sr.addWidget(sigma_lbl)
         self._sigma_spin = QDoubleSpinBox()
         self._sigma_spin.setRange(0.1, 20.0)
         self._sigma_spin.setValue(1.5)
         self._sigma_spin.setSingleStep(0.1)
+        self._sigma_spin.setStyleSheet(SPINBOX_SS)
         sr.addWidget(self._sigma_spin)
         self._sigma_row.hide()
         layout.addWidget(self._sigma_row)
@@ -80,7 +63,9 @@ class FilterPanel(QWidget):
         self._edge_row = QWidget()
         er = QHBoxLayout(self._edge_row)
         er.setContentsMargins(0, 0, 0, 0)
-        er.addWidget(QLabel("Output", styleSheet=f"color:{MUTED};font-size:9px;"))
+        output_lbl = QLabel("Output")
+        output_lbl.setStyleSheet(FIELD_SS)
+        er.addWidget(output_lbl)
         self._edge_group = QButtonGroup(self)
         for label in ("H", "V", "Mag"):
             rb = QRadioButton(label)
@@ -93,39 +78,25 @@ class FilterPanel(QWidget):
 
         # kernel size
         ksz_lbl = QLabel("Kernel size")
-        ksz_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        ksz_lbl.setStyleSheet(FIELD_SS)
         layout.addWidget(ksz_lbl)
 
-        ksz_row = QWidget()
-        krl = QHBoxLayout(ksz_row)
-        krl.setContentsMargins(0, 0, 0, 0)
-        krl.setSpacing(4)
-        self._ksz_group = QButtonGroup(self)
         self._custom_ksz: int | None = None
-        for sz in (3, 5, 7, 9):
-            rb = QRadioButton(f"{sz}×{sz}")
-            rb.setProperty("ksz", sz)
-            rb.setStyleSheet(f"color:{TEXT};font-size:9px;")
-            self._ksz_group.addButton(rb)
-            krl.addWidget(rb)
-            if sz == 3:
-                rb.setChecked(True)
-        self.kernel_btn = QPushButton("⊞")
-        self.kernel_btn.setFixedSize(24, 24)
-        self.kernel_btn.setStyleSheet(btn_style('ghost'))
-        krl.addWidget(self.kernel_btn)
-        layout.addWidget(ksz_row)
+        ksz_row_widget = QWidget()
+        krl = self._build_kernel_size_row()
+        ksz_row_widget.setLayout(krl)
+        layout.addWidget(ksz_row_widget)
 
         # kernel preview
         prev_lbl = QLabel("Kernel preview")
-        prev_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
+        prev_lbl.setStyleSheet(FIELD_SS)
         layout.addWidget(prev_lbl)
 
         self._preview_container = QWidget()
-        self._preview_container.setStyleSheet(f"background:{BG};border:1px solid {BORDER};")
+        self._preview_container.setStyleSheet("background-color: #111210; border: none;")
         self._preview_container.setFixedHeight(80)
         self._preview_grid = QGridLayout(self._preview_container)
-        self._preview_grid.setContentsMargins(4, 4, 4, 4)
+        self._preview_grid.setContentsMargins(0, 0, 0, 0)
         self._preview_grid.setSpacing(2)
         layout.addWidget(self._preview_container)
 
@@ -133,7 +104,7 @@ class FilterPanel(QWidget):
 
         # apply button
         self.apply_btn = QPushButton("Apply Filter")
-        self.apply_btn.setStyleSheet(btn_style('primary'))
+        self.apply_btn.setStyleSheet(APPLY_BTN_SS)
         layout.addWidget(self.apply_btn)
 
         layout.addStretch()
@@ -141,7 +112,6 @@ class FilterPanel(QWidget):
         # connect
         self._filter_combo.currentTextChanged.connect(self._on_filter_changed)
         self._sigma_spin.valueChanged.connect(self._update_kernel_preview)
-        self._ksz_group.buttonClicked.connect(self._update_kernel_preview)
         self._on_filter_changed("Average")
 
     # ------------------------------------------------------------------ slots
@@ -150,6 +120,123 @@ class FilterPanel(QWidget):
         self._sigma_row.setVisible(name == "Gaussian")
         self._edge_row.setVisible(name in ("Sobel", "Prewitt"))
         self._update_kernel_preview()
+
+    def _build_kernel_size_row(self) -> QHBoxLayout:
+        self._kernel_size_btns = {}
+        row = QHBoxLayout()
+        row.setSpacing(3)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        for sz in [3, 5, 7, 9]:
+            btn = QPushButton(f"{sz}×{sz}")
+            btn.setCheckable(True)
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #252623;
+                    color: #6b6f65;
+                    border: 1px solid #353730;
+                    border-radius: 2px;
+                    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+                    font-size: 10px;
+                    font-weight: bold;
+                    padding: 0 6px;
+                }
+                QPushButton:checked {
+                    background: #1a2208;
+                    color: #c8f135;
+                    border-color: #6a8a10;
+                }
+                QPushButton:hover:!checked {
+                    color: #eceee8;
+                    border-color: #484b44;
+                    background: #2c2e2a;
+                }
+            """)
+            btn.clicked.connect(lambda checked, s=sz: self._on_kernel_size_changed(s))
+            self._kernel_size_btns[sz] = btn
+            row.addWidget(btn)
+
+        # Default selection: 3×3
+        self._kernel_size_btns[3].setChecked(True)
+        self._current_kernel_size = 3
+
+        # More / custom kernel button
+        more_btn = QPushButton("⊞")
+        more_btn.setFixedSize(30, 26)
+        more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        more_btn.setToolTip("Open custom kernel editor")
+        more_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #6a8a10;
+                border: 1px dashed #6a8a10;
+                border-radius: 2px;
+                font-size: 14px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                color: #c8f135;
+                border-color: #c8f135;
+            }
+        """)
+        more_btn.clicked.connect(self._open_kernel_modal)
+        self.kernel_btn = more_btn
+        row.addWidget(more_btn)
+
+        return row
+
+    def _on_kernel_size_changed(self, size: int):
+        self._current_kernel_size = size
+        for sz, btn in self._kernel_size_btns.items():
+            btn.setChecked(sz == size)
+        self._update_kernel_preview()
+
+    def _open_kernel_modal(self):
+        pass  # main_window.py handles modal opening via kernel_btn.clicked signal
+
+    def _build_kernel_cell(self, value: float, max_val: float) -> QLabel:
+        cell = QLabel(f"{value:.3f}")
+        cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cell.setFixedSize(38, 26)
+
+        if max_val == 0:
+            intensity = 0.0
+        else:
+            intensity = abs(value) / max_val
+
+        if value > 0:
+            # Positive weight: acid-lime tint, scaled by intensity
+            r = int(12 + intensity * (200 - 12))
+            g = int(16 + intensity * (241 - 16))
+            b = int(2  + intensity * (53  - 2))
+            bg = f"rgb({r},{g},{b})"
+            text_color = "#0d1002" if intensity > 0.35 else "#6b6f65"
+        elif value < 0:
+            # Negative weight (Laplacian, Sobel): red tint
+            r = int(12 + intensity * (180 - 12))
+            g = int(16 + intensity * (30  - 16))
+            b = int(2  + intensity * (30  - 2))
+            bg = f"rgb({r},{g},{b})"
+            text_color = "#eceee8" if intensity > 0.35 else "#6b6f65"
+        else:
+            # Zero: near-black background, very muted text
+            bg = "#1e1f1d"
+            text_color = "#4a4d46"
+
+        cell.setStyleSheet(f"""
+            QLabel {{
+                background-color: {bg};
+                color: {text_color};
+                border: 1px solid #2c2e2a;
+                border-radius: 1px;
+                font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+                font-size: 9px;
+                font-weight: bold;
+            }}
+        """)
+        return cell
 
     def _update_kernel_preview(self):
         sz = self._get_current_kernel_size()
@@ -162,31 +249,12 @@ class FilterPanel(QWidget):
             cell.setParent(None)
         self._preview_cells.clear()
 
-        max_v = max((abs(v) for v in vals), default=1.0) or 1.0
-        cell_h = max(8, min(22, 70 // sz))
+        max_val = max((abs(v) for v in vals), default=1.0) or 1.0
 
         for row in range(sz):
             for col in range(sz):
                 v = vals[row * sz + col]
-                intensity = abs(v) / max_v
-                if v >= 0:
-                    r, g, b = (
-                        int(0x11 + (0xc8 - 0x11) * intensity),
-                        int(0x12 + (0xf1 - 0x12) * intensity),
-                        int(0x10 + (0x35 - 0x10) * intensity),
-                    )
-                else:
-                    r, g, b = (
-                        int(0x11 + (0xff - 0x11) * intensity),
-                        int(0x12 + (0x4d - 0x12) * intensity),
-                        int(0x10 + (0x3a - 0x10) * intensity),
-                    )
-                cell = QLabel(f"{v:.2f}" if sz <= 5 else "")
-                cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                cell.setFixedHeight(cell_h)
-                cell.setStyleSheet(
-                    f"background:rgb({r},{g},{b});color:{TEXT};font-size:7px;border:none;"
-                )
+                cell = self._build_kernel_cell(v, max_val)
                 self._preview_grid.addWidget(cell, row, col)
                 self._preview_cells.append(cell)
 
@@ -233,10 +301,7 @@ class FilterPanel(QWidget):
     def _get_current_kernel_size(self) -> int:
         if self._custom_ksz is not None:
             return self._custom_ksz
-        for btn in self._ksz_group.buttons():
-            if btn.isChecked():
-                return btn.property("ksz")
-        return 3
+        return self._current_kernel_size
 
     @wrap_errors
     def on_apply_clicked(self, image: np.ndarray):

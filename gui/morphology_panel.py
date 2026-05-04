@@ -4,31 +4,6 @@ Panel for binary morphological operations on thresholded medical images.
 User can binarize the image, choose structuring element shape and size, and apply erosion, dilation, opening, closing, or boundary extraction.
 """
 
-# PyQt6.QtWidgets — QWidget, QVBoxLayout, QHBoxLayout, QSlider, QSpinBox, QComboBox, QPushButton, QLabel, QGroupBox
-# PyQt6.QtCore — pyqtSignal
-# processing.morphology.structuring_element — get_square_se, get_cross_se
-# processing.morphology.erosion_dilation — erode, dilate
-# processing.morphology.opening_closing — opening, closing
-# processing.morphology.boundary_extraction — extract_boundary
-# utils.image_utils — binarize: threshold numpy array to 0/1
-
-# FUNCTIONS / CLASSES
-# class MorphologyPanel(QWidget):
-#   def __init__: build UI — threshold slider, SE shape selector, SE size spinner, op buttons
-#   def on_threshold_changed: binarize image at current threshold → display preview
-#   def on_operation_clicked: read SE settings → apply selected op → emit result
-# signal: morphology_applied(np.ndarray)
-
-# --- UTIL USAGE GUIDE ---
-# from utils.image_utils import validate_grayscale, binarize, normalize_to_uint8
-# from utils.error_handler import wrap_errors
-#
-# validate_grayscale(image)           # call before binarize — morphology only works on grayscale
-# binarize(image, threshold)          # call in on_threshold_changed using slider value
-# normalize_to_uint8(result)          # call on morphology output before emitting signal
-# @wrap_errors                        # decorate on_threshold_changed and on_operation_clicked
-# Note: pass the binarized array (not the original) to all erosion/dilation/opening/closing calls
-
 import numpy as np
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                               QSlider, QLabel, QGridLayout, QButtonGroup,
@@ -36,7 +11,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, TEXT, MUTED, MUTED2, btn_style)
+                        ACCENT, TEXT, MUTED, MUTED2, btn_style,
+                        HEADER_SS, FIELD_SS, APPLY_BTN_SS)
 from utils import (validate_grayscale, binarize, normalize_to_uint8, wrap_errors, show_error_dialog,)
 
 
@@ -55,12 +31,12 @@ class MorphologyPanel(QWidget):
 
         # ---- header ----
         hdr = QLabel("MORPHOLOGY")
-        hdr.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;letter-spacing:.15em;")
+        hdr.setStyleSheet(HEADER_SS)
         layout.addWidget(hdr)
 
         # ---- binarization section ----
         bin_lbl = QLabel("BINARIZATION")
-        bin_lbl.setStyleSheet(f"color:{MUTED};font-size:8px;font-weight:bold;letter-spacing:.12em;")
+        bin_lbl.setStyleSheet(HEADER_SS)
         layout.addWidget(bin_lbl)
 
         slider_row = QWidget()
@@ -71,18 +47,42 @@ class MorphologyPanel(QWidget):
         self._threshold_slider = QSlider(Qt.Orientation.Horizontal)
         self._threshold_slider.setRange(0, 255)
         self._threshold_slider.setValue(128)
-        self._threshold_slider.setStyleSheet(
-            "QSlider::groove:horizontal{height:3px;background:#353730;border-radius:2px;}"
-            f"QSlider::handle:horizontal{{width:12px;height:12px;margin:-5px 0;"
-            f"background:{ACCENT};border-radius:6px;border:2px solid #0d1002;}}"
-            f"QSlider::sub-page:horizontal{{background:{ACCENT};border-radius:2px;}}"
-        )
+        self._threshold_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 3px;
+                background: #353730;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                width: 13px;
+                height: 13px;
+                margin: -5px 0;
+                background: #c8f135;
+                border-radius: 7px;
+                border: 2px solid #0d1002;
+            }
+            QSlider::sub-page:horizontal {
+                background: #c8f135;
+                border-radius: 2px;
+            }
+            QSlider::add-page:horizontal {
+                background: #353730;
+                border-radius: 2px;
+            }
+        """)
         srl.addWidget(self._threshold_slider)
 
         self._thresh_val_lbl = QLabel("128")
         self._thresh_val_lbl.setFixedWidth(30)
         self._thresh_val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._thresh_val_lbl.setStyleSheet(f"color:{ACCENT};font-size:10px;font-weight:bold;")
+        self._thresh_val_lbl.setStyleSheet("""
+            QLabel {
+                color: #c8f135;
+                font-family: 'JetBrains Mono', Consolas, monospace;
+                font-size: 13px;
+                font-weight: bold;
+            }
+        """)
         srl.addWidget(self._thresh_val_lbl)
         layout.addWidget(slider_row)
 
@@ -93,14 +93,16 @@ class MorphologyPanel(QWidget):
 
         # ---- structuring element ----
         se_lbl = QLabel("STRUCTURING ELEMENT")
-        se_lbl.setStyleSheet(f"color:{MUTED};font-size:8px;font-weight:bold;letter-spacing:.12em;")
+        se_lbl.setStyleSheet(HEADER_SS)
         layout.addWidget(se_lbl)
 
         shape_row = QWidget()
         shrl = QHBoxLayout(shape_row)
         shrl.setContentsMargins(0, 0, 0, 0)
         shrl.setSpacing(4)
-        shrl.addWidget(QLabel("Shape", styleSheet=f"color:{MUTED};font-size:9px;"))
+        shape_field_lbl = QLabel("Shape")
+        shape_field_lbl.setStyleSheet(FIELD_SS)
+        shrl.addWidget(shape_field_lbl)
         self._shape_group = QButtonGroup(self)
         for label in ("Square", "Cross"):
             rb = QRadioButton(label)
@@ -116,7 +118,9 @@ class MorphologyPanel(QWidget):
         szrl = QHBoxLayout(size_row)
         szrl.setContentsMargins(0, 0, 0, 0)
         szrl.setSpacing(4)
-        szrl.addWidget(QLabel("Size", styleSheet=f"color:{MUTED};font-size:9px;"))
+        size_field_lbl = QLabel("Size")
+        size_field_lbl.setStyleSheet(FIELD_SS)
+        szrl.addWidget(size_field_lbl)
         self._size_group = QButtonGroup(self)
         for sz in (3, 5, 7):
             rb = QRadioButton(f"{sz}×{sz}")
@@ -134,7 +138,7 @@ class MorphologyPanel(QWidget):
 
         # ---- operations ----
         ops_lbl = QLabel("OPERATIONS")
-        ops_lbl.setStyleSheet(f"color:{MUTED};font-size:8px;font-weight:bold;letter-spacing:.12em;")
+        ops_lbl.setStyleSheet(HEADER_SS)
         layout.addWidget(ops_lbl)
 
         ops_grid = QWidget()
@@ -151,7 +155,7 @@ class MorphologyPanel(QWidget):
         layout.addWidget(ops_grid)
 
         boundary_btn = QPushButton("Extract Boundary")
-        boundary_btn.setStyleSheet(btn_style('primary'))
+        boundary_btn.setStyleSheet(APPLY_BTN_SS)
         boundary_btn.clicked.connect(lambda: self._apply_op("Boundary"))
         layout.addWidget(boundary_btn)
 
