@@ -18,3 +18,30 @@ Applies horizontal and/or vertical shearing transforms without built-in function
 # validate_grayscale(image)           # call before inverse mapping loop
 # normalize_to_uint8(output)          # call on sheared array before returning
 # @wrap_errors                        # decorate shear_image
+
+import numpy as np
+from processing.interpolation.bilinear import bilinear_sample
+from utils.image_utils import validate_grayscale, normalize_to_uint8
+from utils.error_handler import wrap_errors
+
+
+@wrap_errors
+def shear_image(image: np.ndarray, shear_x: float, shear_y: float) -> np.ndarray:
+	validate_grayscale(image)
+
+	h, w = image.shape
+	output = np.zeros((h, w), dtype=np.float64)
+
+	for i in range(h):
+		for j in range(w):
+			# inverse mapping for shear transformation
+			x_prime = j
+			y_prime = i
+			src_x = x_prime - shear_x * y_prime
+			src_y = y_prime - shear_y * x_prime
+
+			if 0 <= src_x < w - 1 and 0 <= src_y < h - 1:
+				# bilinear interpolation at non-integer coordinates
+				output[i, j] = bilinear_sample(image, src_y, src_x)
+
+	return normalize_to_uint8(output)
