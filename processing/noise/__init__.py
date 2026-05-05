@@ -1,1 +1,1 @@
-﻿"""Noise subpackage: noise injection and ROI statistics."""
+"""Noise subpackage: noise injection, ROI statistics, image quality metrics."""

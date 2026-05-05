@@ -173,18 +173,24 @@ class MainWindow(QMainWindow):
         from gui.fourier_panel import FourierPanel
         from gui.morphology_panel import MorphologyPanel
         from gui.noise_panel import NoisePanel
+        from gui.template_panel import TemplatePanel
+        from gui.ai_panel import AIPanel
 
         self._filter_panel = FilterPanel()
         self._hist_panel = HistogramPanel()
         self._fourier_panel = FourierPanel()
         self._morph_panel = MorphologyPanel()
         self._noise_panel = NoisePanel()
+        self.template_panel = TemplatePanel()
+        self.ai_panel = AIPanel()
 
         right_tabs.addTab(self._filter_panel, "FILTER")
         right_tabs.addTab(self._hist_panel, "HIST")
         right_tabs.addTab(self._fourier_panel, "FREQ")
         right_tabs.addTab(self._morph_panel, "MORPH")
         right_tabs.addTab(self._noise_panel, "NOISE")
+        right_tabs.addTab(self.template_panel, "TMPL")
+        right_tabs.addTab(self.ai_panel, "AI")
         splitter.addWidget(right_tabs)
 
         splitter.setStretchFactor(0, 0)
@@ -294,6 +300,12 @@ class MainWindow(QMainWindow):
         self._noise_panel.inject_btn.clicked.connect(self._noise_panel.on_inject_clicked)
         self._noise_panel.noise_applied.connect(self.on_operation_applied)
 
+        # template panel (Phase 2)
+        self.template_panel.template_match_found.connect(self.on_operation_applied)
+
+        # AI panel (Phase 2 bonus)
+        self.ai_panel.suggestion_applied.connect(self.on_operation_applied)
+
         # pipeline panel
         self._pipeline_panel.undo_requested.connect(self._do_undo)
         self._pipeline_panel.reset_requested.connect(self._do_reset)
@@ -343,6 +355,14 @@ class MainWindow(QMainWindow):
         self._morph_panel.set_image(image)
         self._noise_panel.set_image(image)
         self._filter_panel.set_current_image(image)
+        try:
+            self.template_panel.set_current_image(image)
+        except AttributeError:
+            pass
+        try:
+            self.ai_panel.set_current_image(image)
+        except AttributeError:
+            pass
         h, w = image.shape[:2]
         self._sb_dim.setText(f"{w}×{h}")
         self._sb_op.setText("OP: load")
@@ -372,6 +392,14 @@ class MainWindow(QMainWindow):
         # Phase 2 only — frequency domain disabled in Phase 1
         # self._fourier_panel.set_image(result)
         self._filter_panel.set_current_image(base)
+        try:
+            self.template_panel.set_current_image(result)
+        except AttributeError:
+            pass
+        try:
+            self.ai_panel.set_current_image(result)
+        except AttributeError:
+            pass
 
         stack_depth = len(self.pipeline.get_stack_names())
         self._sb_op.setText(f"OP: {op_name[:18]}")
@@ -465,6 +493,17 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 import logging
                 logging.getLogger('ciaw').error(f"noise ROI stats not ready: {e}")
+
+            try:
+                self.template_panel.set_template_from_roi(image, roi)
+            except Exception as e:
+                import logging
+                logging.getLogger('ciaw').error(f"template ROI not ready: {e}")
+
+            try:
+                self.ai_panel.set_current_roi(roi)
+            except AttributeError:
+                pass
 
         except Exception as e:
             import logging
