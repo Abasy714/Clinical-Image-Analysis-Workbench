@@ -27,20 +27,22 @@ def _build_gaussian_kernel(size: int, sigma: float) -> np.ndarray:
     kernel : 2D float64 array of shape (size, size), sums to 1.0
     """
     if size % 2 == 0:
-        raise ValueError(f"Kernel size must be odd, got {size}")
+        raise ValueError(f"Kernel size must be odd, got {size}") #kernal size must be odd 
     if sigma <= 0:
-        raise ValueError(f"Sigma must be positive, got {sigma}")
-
+        raise ValueError(f"Sigma must be positive, got {sigma}") #standards deviation must be positive
+    
+    #setting up
     center = size // 2
-    kernel = np.zeros((size, size), dtype=np.float64)
+    kernel = np.zeros((size, size), dtype=np.float64) #kernel full of zeros
 
     for row in range(size):
         for col in range(size):
-            x = col - center
+            x = col - center 
             y = row - center
-            kernel[row, col] = np.exp(-(x ** 2 + y ** 2) / (2.0 * sigma ** 2))
+            kernel[row, col] = np.exp(-(x ** 2 + y ** 2) / (2.0 * sigma ** 2)) #the further away from center the smaller the value in the kernell
 
-    # normalize so kernel sums to 1 (no net brightness change)
+    # normalize so kernel sums to 1 (no net brightness change) to make sure the output image has the same overall brightness as the input image,
+    #so we divide each value in the kernel by the total sum of all values in the kernel
     total = kernel.sum()
     if total > 0:
         kernel /= total
@@ -71,8 +73,8 @@ def average_filter(image: np.ndarray, kernel_size: int) -> np.ndarray:
         raise ValueError(f"kernel_size must be >= 1, got {kernel_size}")
 
     # uniform kernel — all weights equal 1/n²
-    n = kernel_size * kernel_size
-    kernel = np.ones((kernel_size, kernel_size), dtype=np.float64) / n
+    n = kernel_size * kernel_size #for a 3x3 kernel, n would be 9, for a 5x5 kernel, n would be 25, etc.
+    kernel = np.ones((kernel_size, kernel_size), dtype=np.float64) / n #create the kernel then mulyiplying by the factor 1/n^2
 
     raw = convolve2d(image, kernel)
     return normalize_to_uint8(raw)
@@ -103,6 +105,6 @@ def gaussian_filter(image: np.ndarray, kernel_size: int, sigma: float) -> np.nda
     if sigma <= 0:
         raise ValueError(f"sigma must be positive, got {sigma}")
 
-    kernel = _build_gaussian_kernel(kernel_size, sigma)
-    raw = convolve2d(image, kernel)
-    return normalize_to_uint8(raw)
+    kernel = _build_gaussian_kernel(kernel_size, sigma) #calls the function to build the gaussian kernel using the specified size and sigma
+    raw = convolve2d(image, kernel) #apply convolution lel image 
+    return normalize_to_uint8(raw) #ben normalize the output le range 0-255 and convert to uint8 for proper image representation
