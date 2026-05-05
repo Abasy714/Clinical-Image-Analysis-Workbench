@@ -33,13 +33,13 @@ PREWITT_Y = np.array([
 ], dtype=np.float64)
 
 
-def combined_magnitude(gx: np.ndarray, gy: np.ndarray) -> np.ndarray:
+def combined_magnitude(gx: np.ndarray, gy: np.ndarray) -> np.ndarray: #compute the combined gradient magnitude from the horizontal (gx) and vertical (gy) components, we use the formula magnitude = sqrt(Gx² + Gy²)
     """
     Compute the gradient magnitude from horizontal and vertical components.
     Formula: magnitude = sqrt(Gx² + Gy²)
     """
-    mag = np.sqrt(gx.astype(np.float64) ** 2 + gy.astype(np.float64) ** 2)
-    return normalize_to_uint8(mag)
+    mag = np.sqrt(gx.astype(np.float64) ** 2 + gy.astype(np.float64) ** 2) #magnitude = sqrt(Gx² + Gy²) -- ehna ben7seb el magnitude using the formula sqrt(Gx² + Gy²), we convert gx and gy to float64 to avoid overflow during squaring
+    return normalize_to_uint8(mag) #convert back to uint8 for display, we normalize the magnitude to the range [0, 255] 
 
 
 @wrap_errors
