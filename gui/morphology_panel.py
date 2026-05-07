@@ -91,6 +91,11 @@ class MorphologyPanel(QWidget):
         # divider
         layout.addWidget(_hdiv())
 
+        preview_btn = QPushButton("Preview Threshold") #added by sohaila
+        preview_btn.setStyleSheet(btn_style())
+        preview_btn.clicked.connect(self._on_preview_clicked)
+        layout.addWidget(preview_btn)
+
         # ---- structuring element ----
         se_lbl = QLabel("STRUCTURING ELEMENT")
         se_lbl.setStyleSheet(HEADER_SS)
@@ -183,6 +188,13 @@ class MorphologyPanel(QWidget):
         if self._source_image is not None:
             self._binary_image = binarize(self._source_image, value)
 
+    def _on_preview_clicked(self): #added by sohaila
+        if self._binary_image is None:
+            show_error_dialog("No image", "Load an image first.")
+            return
+        preview = normalize_to_uint8(self._binary_image.astype(np.uint8) * 255)
+        self.morphology_applied.emit("Threshold preview", preview)       
+
     def _get_se(self) -> np.ndarray:
         size = 3
         for btn in self._size_group.buttons():
@@ -201,7 +213,7 @@ class MorphologyPanel(QWidget):
         if self._binary_image is None:
             show_error_dialog("No image", "Load and threshold an image first.")
             return
-        try:
+        try: 
             se = self._get_se()
 
             if op_name == "Erode":
@@ -221,8 +233,9 @@ class MorphologyPanel(QWidget):
                 result = extract_boundary(self._binary_image, se)
             else:
                 return
-
-            result = normalize_to_uint8(result * 255)
+ 
+            result = normalize_to_uint8(result.astype(np.uint8) * 255) #changed by sohaila
+        
             self.morphology_applied.emit(op_name, result)
         except (ImportError, NotImplementedError, Exception) as e:
             show_error_dialog("Morphology Error", f"Operation '{op_name}' failed.\n{e}")
