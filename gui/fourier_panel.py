@@ -194,14 +194,16 @@ class FourierPanel(QWidget):
     # ------------------------------------------------------------------ public
 
     def set_image(self, image: np.ndarray):
-        """
-        Phase 2 only. Frequency domain spectrum computation.
-        Disabled in Phase 1 — called only when Freq tab is active.
-        """
-        # Store image for when Phase 2 is implemented
-        self._pending_image = image
-        # Do NOT compute spectrum here — compute_spectrum not implemented yet
-        return
+        try:
+            validate_grayscale(image)
+            from processing.frequency.spectrum import compute_spectrum
+            self._shifted_fft, log_magnitude, _ = compute_spectrum(image)
+            self._spectrum_shape = log_magnitude.shape
+            self._canvas.set_spectrum(log_magnitude)
+            self._canvas.set_notches(self._notch_points)
+        except Exception:
+            self._shifted_fft = None
+            return
 
     def on_apply_clicked(self):
         if self._shifted_fft is None:
