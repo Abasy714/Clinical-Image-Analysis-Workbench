@@ -110,10 +110,38 @@ class TemplatePanel(QWidget):
                 pass
             return
         try:
-            from processing.frequency import fourier_cross_correlate, find_best_match  # noqa: F401
-            raise NotImplementedError("template matching — Phase 2")
-        except NotImplementedError:
-            import logging
-            logging.getLogger('ciaw').error(
-                "fourier_cross_correlate not implemented yet"
+            import numpy as np
+            from processing.frequency import fourier_cross_correlate, find_best_match
+
+            corr = fourier_cross_correlate(self._current_image, self._template)
+            peak_row, peak_col = find_best_match(corr)
+
+            # Convert fftshift-centred peak to image coordinates
+            H, W = self._current_image.shape[:2]
+            img_row = (peak_row - H // 2) % H
+            img_col = (peak_col - W // 2) % W
+
+            th, tw = self._template.shape[:2]
+
+            # Draw white match rectangle on the image (no cv2)
+            result = self._current_image.copy()
+            r1 = max(0, img_row)
+            c1 = max(0, img_col)
+            r2 = min(H - 1, img_row + th)
+            c2 = min(W - 1, img_col + tw)
+            result[r1:r1 + 2, c1:c2] = 255
+            result[r2 - 1:r2 + 1, c1:c2] = 255
+            result[r1:r2, c1:c1 + 2] = 255
+            result[r1:r2, c2 - 1:c2 + 1] = 255
+
+            # Normalised peak confidence
+            confidence = float(corr.max()) / (float(corr.mean()) + 1e-10)
+
+            self._result_label.setText(f"Match at row={img_row}, col={img_col}")
+            self._confidence_label.setText(f"Peak confidence: {confidence:.1f}×")
+            self.template_match_found.emit(
+                f"Template Match r={img_row} c={img_col}", result
             )
+        except Exception as e:
+            import logging
+            logging.getLogger('ciaw').error(f"template matching error: {e}")

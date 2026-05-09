@@ -102,7 +102,9 @@ class FourierPanel(QWidget):
         super().__init__(parent)
         self._notch_points: list = []
         self._shifted_fft: np.ndarray | None = None
+        self._raw_image: np.ndarray | None = None
         self._spectrum_shape: tuple = (1, 1)
+        self._domain: str = "frequency"
 
         self.setStyleSheet(f"background:{PANEL};")
         layout = QVBoxLayout(self)
@@ -173,6 +175,51 @@ class FourierPanel(QWidget):
 
         self._shape_group.buttonClicked.connect(self._on_shape_changed)
 
+        # spatial / frequency domain toggle
+        domain_lbl = QLabel("Domain")
+        domain_lbl.setStyleSheet(FIELD_SS)
+        layout.addWidget(domain_lbl)
+
+        domain_row = QWidget()
+        drl = QHBoxLayout(domain_row)
+        drl.setContentsMargins(0, 0, 0, 0)
+        drl.setSpacing(4)
+        self._spatial_btn = QPushButton("Spatial")
+        self._spatial_btn.setCheckable(True)
+        self._spatial_btn.setChecked(False)
+        self._spatial_btn.setStyleSheet(btn_style('ghost'))
+        self._spatial_btn.clicked.connect(lambda: self._set_domain("spatial"))
+        drl.addWidget(self._spatial_btn)
+        self._freq_btn = QPushButton("Frequency")
+        self._freq_btn.setCheckable(True)
+        self._freq_btn.setChecked(True)
+        self._freq_btn.setStyleSheet(btn_style())
+        self._freq_btn.clicked.connect(lambda: self._set_domain("frequency"))
+        drl.addWidget(self._freq_btn)
+        drl.addStretch()
+        layout.addWidget(domain_row)
+
+        # magnitude / phase toggle
+        self._spectrum_mode: str = "magnitude"
+        phase_row = QWidget()
+        phl = QHBoxLayout(phase_row)
+        phl.setContentsMargins(0, 0, 0, 0)
+        phl.setSpacing(4)
+        self._mag_btn = QPushButton("Magnitude")
+        self._mag_btn.setCheckable(True)
+        self._mag_btn.setChecked(True)
+        self._mag_btn.setStyleSheet(btn_style())
+        self._mag_btn.clicked.connect(lambda: self._set_spectrum_mode("magnitude"))
+        phl.addWidget(self._mag_btn)
+        self._phase_btn = QPushButton("Phase")
+        self._phase_btn.setCheckable(True)
+        self._phase_btn.setChecked(False)
+        self._phase_btn.setStyleSheet(btn_style('ghost'))
+        self._phase_btn.clicked.connect(lambda: self._set_spectrum_mode("phase"))
+        phl.addWidget(self._phase_btn)
+        phl.addStretch()
+        layout.addWidget(phase_row)
+
         # clear notches
         clr_btn = QPushButton("Clear notches")
         clr_btn.setStyleSheet(btn_style('ghost'))
@@ -196,14 +243,53 @@ class FourierPanel(QWidget):
     def set_image(self, image: np.ndarray):
         try:
             validate_grayscale(image)
+            self._raw_image = image
             from processing.frequency.spectrum import compute_spectrum
             self._shifted_fft, log_magnitude, _ = compute_spectrum(image)
             self._spectrum_shape = log_magnitude.shape
-            self._canvas.set_spectrum(log_magnitude)
+            self._update_canvas_display()
             self._canvas.set_notches(self._notch_points)
         except Exception:
             self._shifted_fft = None
             return
+
+    def _set_spectrum_mode(self, mode: str):
+        self._spectrum_mode = mode
+        self._mag_btn.setChecked(mode == "magnitude")
+        self._phase_btn.setChecked(mode == "phase")
+        self._mag_btn.setStyleSheet(btn_style() if mode == "magnitude" else btn_style('ghost'))
+        self._phase_btn.setStyleSheet(btn_style() if mode == "phase" else btn_style('ghost'))
+        self._update_canvas_display()
+
+    def _set_domain(self, domain: str):
+        self._domain = domain
+        self._spatial_btn.setChecked(domain == "spatial")
+        self._freq_btn.setChecked(domain == "frequency")
+        self._spatial_btn.setStyleSheet(btn_style() if domain == "spatial" else btn_style('ghost'))
+        self._freq_btn.setStyleSheet(btn_style() if domain == "frequency" else btn_style('ghost'))
+        self._update_canvas_display()
+
+    def _update_canvas_display(self):
+        if self._domain == "spatial":
+            if self._raw_image is None:
+                return
+            try:
+                self._canvas.set_spectrum(self._raw_image.astype(np.float64))
+            except Exception:
+                pass
+            return
+        if self._shifted_fft is None:
+            return
+        try:
+            if self._spectrum_mode == "phase":
+                from processing.frequency.spectrum import phase_to_display
+                display = phase_to_display(self._shifted_fft)
+            else:
+                from processing.frequency.spectrum import spectrum_to_display
+                display = spectrum_to_display(self._shifted_fft)
+            self._canvas.set_spectrum(display)
+        except Exception:
+            pass
 
     def on_apply_clicked(self):
         if self._shifted_fft is None:

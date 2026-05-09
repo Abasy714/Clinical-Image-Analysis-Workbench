@@ -179,7 +179,7 @@ class MainWindow(QMainWindow):
         self._filter_panel = FilterPanel()
         self._hist_panel = HistogramPanel()
         self._fourier_panel = FourierPanel()
-        self._morph_panel = MorphologyPanel()
+        self._morph_panel = MorphologyPanel(state=self.pipeline)
         self._noise_panel = NoisePanel()
         self.template_panel = TemplatePanel()
         self.ai_panel = AIPanel()
@@ -295,6 +295,8 @@ class MainWindow(QMainWindow):
 
         # morphology panel
         self._morph_panel.morphology_applied.connect(self.on_operation_applied)
+        self._morph_panel.segmentation_applied.connect(self._on_segmentation_applied)
+        self._morph_panel.display_override.connect(self._image_viewer.set_image)
 
         # noise panel
         self._noise_panel.inject_btn.clicked.connect(self._noise_panel.on_inject_clicked)
@@ -350,8 +352,10 @@ class MainWindow(QMainWindow):
         self._metadata_panel.update_metadata(metadata)
         self._pipeline_panel.refresh_stack()
         self._pipeline_panel.update_checkpoints()
-        # Phase 2 only — frequency domain disabled in Phase 1
-        # self._fourier_panel.set_image(image)
+        try:
+            self._fourier_panel.set_image(image)
+        except Exception:
+            pass
         self._morph_panel.set_image(image)
         self._noise_panel.set_image(image)
         self._filter_panel.set_current_image(image)
@@ -389,8 +393,10 @@ class MainWindow(QMainWindow):
         base = self.pipeline.get_base_image()
         self._morph_panel.set_image(base)
         self._noise_panel.set_image(base)
-        # Phase 2 only — frequency domain disabled in Phase 1
-        # self._fourier_panel.set_image(result)
+        try:
+            self._fourier_panel.set_image(result)
+        except Exception:
+            pass
         self._filter_panel.set_current_image(base)
         try:
             self.template_panel.set_current_image(result)
@@ -410,6 +416,12 @@ class MainWindow(QMainWindow):
         self._image_viewer.show_processing_overlay(False)
 
         self.logger.info("Operation applied: %s", op_name)
+
+    def _on_segmentation_applied(self, op_name: str, result: np.ndarray):
+        current = self.pipeline.current()
+        if current is not None and hasattr(self._image_viewer, 'set_before_image'):
+            self._image_viewer.set_before_image(current)
+        self.on_operation_applied(op_name, result)
 
     def update_status_bar(self, **kwargs):
         mapping = {

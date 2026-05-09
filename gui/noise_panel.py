@@ -1,7 +1,8 @@
 # STATUS: IMPLEMENTED
 """
 Panel for synthetic noise injection and ROI-based statistical analysis.
-Allows the user to inject Gaussian or uniform noise and view local statistics of a drawn ROI.
+Allows the user to inject Gaussian, uniform, Rayleigh, exponential, or salt-and-pepper
+noise and view local statistics of a drawn ROI.
 """
 
 import numpy as np
@@ -64,6 +65,7 @@ class NoisePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current_image: np.ndarray | None = None
+        self._last_roi: QRect | None = None
 
         self.setStyleSheet(f"background:{PANEL};")
         layout = QVBoxLayout(self)
@@ -79,11 +81,11 @@ class NoisePanel(QWidget):
         type_lbl.setStyleSheet(FIELD_SS)
         layout.addWidget(type_lbl)
         self._type_combo = QComboBox()
-        self._type_combo.addItems(["Gaussian", "Uniform"])
+        self._type_combo.addItems(["Gaussian", "Uniform", "Rayleigh", "Exponential", "Salt & Pepper"])
         self._type_combo.setStyleSheet(COMBO_SS)
         layout.addWidget(self._type_combo)
 
-        # Gaussian params
+        # --- Gaussian params ---
         self._gauss_w = QWidget()
         gl = QGridLayout(self._gauss_w)
         gl.setContentsMargins(0, 0, 0, 0)
@@ -106,7 +108,7 @@ class NoisePanel(QWidget):
         gl.addWidget(self._gauss_sigma, 1, 1)
         layout.addWidget(self._gauss_w)
 
-        # Uniform params
+        # --- Uniform params ---
         self._uniform_w = QWidget()
         ul = QGridLayout(self._uniform_w)
         ul.setContentsMargins(0, 0, 0, 0)
@@ -129,6 +131,66 @@ class NoisePanel(QWidget):
         ul.addWidget(self._uniform_high, 1, 1)
         self._uniform_w.hide()
         layout.addWidget(self._uniform_w)
+
+        # --- Rayleigh params ---
+        self._rayleigh_w = QWidget()
+        ryl = QGridLayout(self._rayleigh_w)
+        ryl.setContentsMargins(0, 0, 0, 0)
+        ryl.setSpacing(4)
+        ry_lbl = QLabel("Scale")
+        ry_lbl.setStyleSheet(FIELD_SS)
+        ryl.addWidget(ry_lbl, 0, 0)
+        self._rayleigh_scale = QDoubleSpinBox()
+        self._rayleigh_scale.setRange(1.0, 100.0)
+        self._rayleigh_scale.setValue(20.0)
+        self._rayleigh_scale.setStyleSheet(SPINBOX_SS)
+        ryl.addWidget(self._rayleigh_scale, 0, 1)
+        self._rayleigh_w.hide()
+        layout.addWidget(self._rayleigh_w)
+
+        # --- Exponential params ---
+        self._exp_w = QWidget()
+        exl = QGridLayout(self._exp_w)
+        exl.setContentsMargins(0, 0, 0, 0)
+        exl.setSpacing(4)
+        ex_lbl = QLabel("Scale")
+        ex_lbl.setStyleSheet(FIELD_SS)
+        exl.addWidget(ex_lbl, 0, 0)
+        self._exp_scale = QDoubleSpinBox()
+        self._exp_scale.setRange(1.0, 100.0)
+        self._exp_scale.setValue(20.0)
+        self._exp_scale.setStyleSheet(SPINBOX_SS)
+        exl.addWidget(self._exp_scale, 0, 1)
+        self._exp_w.hide()
+        layout.addWidget(self._exp_w)
+
+        # --- Salt & Pepper params ---
+        self._sp_w = QWidget()
+        spl = QGridLayout(self._sp_w)
+        spl.setContentsMargins(0, 0, 0, 0)
+        spl.setSpacing(4)
+        salt_lbl = QLabel("Salt prob")
+        salt_lbl.setStyleSheet(FIELD_SS)
+        spl.addWidget(salt_lbl, 0, 0)
+        self._sp_salt = QDoubleSpinBox()
+        self._sp_salt.setRange(0.001, 0.5)
+        self._sp_salt.setValue(0.02)
+        self._sp_salt.setDecimals(3)
+        self._sp_salt.setSingleStep(0.005)
+        self._sp_salt.setStyleSheet(SPINBOX_SS)
+        spl.addWidget(self._sp_salt, 0, 1)
+        pepper_lbl = QLabel("Pepper prob")
+        pepper_lbl.setStyleSheet(FIELD_SS)
+        spl.addWidget(pepper_lbl, 1, 0)
+        self._sp_pepper = QDoubleSpinBox()
+        self._sp_pepper.setRange(0.001, 0.5)
+        self._sp_pepper.setValue(0.02)
+        self._sp_pepper.setDecimals(3)
+        self._sp_pepper.setSingleStep(0.005)
+        self._sp_pepper.setStyleSheet(SPINBOX_SS)
+        spl.addWidget(self._sp_pepper, 1, 1)
+        self._sp_w.hide()
+        layout.addWidget(self._sp_w)
 
         # inject button
         self.inject_btn = QPushButton("Inject Noise")
@@ -159,8 +221,8 @@ class NoisePanel(QWidget):
 
         self._stat_labels: dict = {}
         for row, (key, display) in enumerate([
-            ("mean", "Mean"), ("var", "Variance"),
-            ("min", "Min"), ("max", "Max"), ("count", "Pixels")
+            ("mean", "Mean"), ("std", "Std Dev"),
+            ("var", "Variance"), ("snr", "SNR"), ("entropy", "Entropy")
         ]):
             sg.addWidget(QLabel(display, styleSheet=f"color:{MUTED};font-size:9px;"), row, 0)
             v = QLabel("—")
@@ -183,6 +245,9 @@ class NoisePanel(QWidget):
     def _on_type_changed(self, name: str):
         self._gauss_w.setVisible(name == "Gaussian")
         self._uniform_w.setVisible(name == "Uniform")
+        self._rayleigh_w.setVisible(name == "Rayleigh")
+        self._exp_w.setVisible(name == "Exponential")
+        self._sp_w.setVisible(name == "Salt & Pepper")
 
     def on_inject_clicked(self):
         if self._current_image is None:
@@ -197,12 +262,35 @@ class NoisePanel(QWidget):
                 sigma = self._gauss_sigma.value()
                 result = add_gaussian_noise(self._current_image, mean, sigma)
                 op_name = f"Gaussian Noise μ={mean:.0f} σ={sigma:.0f}"
-            else:
+
+            elif noise_type == "Uniform":
                 from processing.noise.noise_injection import add_uniform_noise
                 low = self._uniform_low.value()
                 high = self._uniform_high.value()
                 result = add_uniform_noise(self._current_image, low, high)
                 op_name = f"Uniform Noise [{low:.0f},{high:.0f}]"
+
+            elif noise_type == "Rayleigh":
+                from processing.noise.noise_injection import add_rayleigh_noise
+                scale = self._rayleigh_scale.value()
+                result = add_rayleigh_noise(self._current_image, scale)
+                op_name = f"Rayleigh Noise scale={scale:.1f}"
+
+            elif noise_type == "Exponential":
+                from processing.noise.noise_injection import add_exponential_noise
+                scale = self._exp_scale.value()
+                result = add_exponential_noise(self._current_image, scale)
+                op_name = f"Exponential Noise scale={scale:.1f}"
+
+            elif noise_type == "Salt & Pepper":
+                from processing.noise.noise_injection import add_salt_and_pepper_noise
+                salt_prob = self._sp_salt.value()
+                pepper_prob = self._sp_pepper.value()
+                result = add_salt_and_pepper_noise(self._current_image, salt_prob, pepper_prob)
+                op_name = f"Salt&Pepper s={salt_prob:.3f} p={pepper_prob:.3f}"
+
+            else:
+                return
 
             result = normalize_to_uint8(result)
             self.noise_applied.emit(op_name, result)
@@ -210,25 +298,40 @@ class NoisePanel(QWidget):
             show_error_dialog("Noise Error", f"Noise injection failed.\n{e}")
 
     def update_roi_stats(self, image: np.ndarray, roi: QRect):
+        self._last_roi = roi
         try:
             validate_grayscale(image)
-            from processing.noise.roi_stats import compute_roi_stats, extract_roi
+            from processing.noise.roi_stats import extract_roi
             from processing.histogram.histogram_utils import compute_histogram
             roi_pixels = extract_roi(image, roi.x(), roi.y(), roi.width(), roi.height())
             if roi_pixels.size == 0:
                 return
             hist = compute_histogram(roi_pixels)
             self._hist_canvas.set_histogram(hist)
-            self._stat_labels["mean"].setText(f"{roi_pixels.mean():.2f}")
-            self._stat_labels["var"].setText(f"{roi_pixels.var():.2f}")
-            self._stat_labels["min"].setText(f"{int(roi_pixels.min())}")
-            self._stat_labels["max"].setText(f"{int(roi_pixels.max())}")
-            self._stat_labels["count"].setText(f"{roi_pixels.size}")
+
+            flat = roi_pixels.flatten().astype(np.float64)
+            mean = float(flat.mean())
+            std  = float(flat.std())
+            var  = float(flat.var())
+            snr  = mean / std if std > 1e-10 else 0.0
+
+            h_norm = hist.astype(np.float64)
+            total = h_norm.sum()
+            if total > 0:
+                h_norm /= total
+                h_nonzero = h_norm[h_norm > 0]
+                entropy = float(-np.sum(h_nonzero * np.log2(h_nonzero)))
+            else:
+                entropy = 0.0
+
+            self._stat_labels["mean"].setText(f"{mean:.2f}")
+            self._stat_labels["std"].setText(f"{std:.2f}")
+            self._stat_labels["var"].setText(f"{var:.2f}")
+            self._stat_labels["snr"].setText(f"{snr:.2f}")
+            self._stat_labels["entropy"].setText(f"{entropy:.3f}")
         except ImportError as e:
             import logging
             logging.getLogger('ciaw').error(f"ROI stats not ready: {e}")
-            return
         except Exception as e:
             import logging
             logging.getLogger('ciaw').error(f"update_roi_stats error: {e}")
-            return

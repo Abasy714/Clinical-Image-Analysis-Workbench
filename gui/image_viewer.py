@@ -225,8 +225,9 @@ class ImageViewer(QWidget):
         if image is None or not isinstance(image, np.ndarray):
             return
         img = image.copy()
-        if img.ndim == 3:
-            img = np.mean(img, axis=2).astype(np.uint8)
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = img[:, :, :3]  # drop alpha, keep RGB
+        # 3-channel RGB preserved as-is; 2-D grayscale unchanged
         self._image = normalize_to_uint8(img)
 
         self._display_image = self._image
@@ -363,27 +364,13 @@ class ImageViewer(QWidget):
             return
 
         zoom_factor = self._zoom / 100.0
-        h, w = base.shape[:2]
-        new_h = max(1, int(round(h * zoom_factor)))
-        new_w = max(1, int(round(w * zoom_factor)))
         _img = base.copy()
         _mode = self._interp_mode
 
         def _zoom_fn():
-            if _mode == 'nearest':
-                from processing.interpolation import nearest_neighbor_resize
-                result = nearest_neighbor_resize(_img, new_h, new_w)
-                return result if result is not None else _img
-            else:
-                from processing.interpolation import bilinear_resize
-                result = bilinear_resize(_img, new_h, new_w)
-                if result is None:
-                    from processing.interpolation import nearest_neighbor_resize
-                    return nearest_neighbor_resize(_img, new_h, new_w)
-                mn, mx = float(result.min()), float(result.max())
-                if mx > mn:
-                    return ((result.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
-                return np.zeros((new_h, new_w), dtype=np.uint8)
+            from processing.interpolation.zoom import apply_zoom
+            result = apply_zoom(_img, zoom_factor, _mode)
+            return result if result is not None else _img
 
         requested_zoom = self._zoom
         self._zoom_worker = ZoomWorker(_zoom_fn, parent=self)
