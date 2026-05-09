@@ -289,6 +289,126 @@ class SegmentationWorker(QThread):
             _log.error("[ERROR] SegmentationWorker: %s", e)
             self.error.emit(str(e))
 
+_log = logging.getLogger('ciaw')
+
+
+class MorphologyWorker(QThread):
+    result_ready = pyqtSignal(str, np.ndarray)
+    error        = pyqtSignal(str)
+
+    def __init__(self, state, op_name: str, se: np.ndarray, threshold: int,
+                 is_advanced: bool = False, parent=None):
+        super().__init__(parent)
+        self._state       = state
+        self._op_name     = op_name
+        self._se          = se
+        self._threshold   = threshold
+        self._is_advanced = is_advanced
+
+    def run(self):
+        _log.debug("[DEBUG] MorphologyWorker.run() start: op=%s", self._op_name)
+        try:
+            image = self._state.get_base_image()
+            if image is None:
+                self.error.emit("No image loaded.")
+                return
+            validate_grayscale(image)
+            binary = binarize(image, self._threshold)
+
+            if self._is_advanced:
+                from processing.morphology.advanced import apply_advanced_op
+                result_bool = apply_advanced_op(self._op_name, binary, self._se)
+                result = normalize_to_uint8(result_bool.astype(np.uint8) * 255)
+                label = self._op_name.replace("_", " ").title()
+            else:
+                op = self._op_name
+                if op == "Erode":
+                    from processing.morphology.erosion_dilation import erode
+                    result = normalize_to_uint8(erode(binary, self._se).astype(np.uint8) * 255)
+                elif op == "Dilate":
+                    from processing.morphology.erosion_dilation import dilate
+                    result = normalize_to_uint8(dilate(binary, self._se).astype(np.uint8) * 255)
+                elif op == "Open":
+                    from processing.morphology.opening_closing import opening
+                    result = normalize_to_uint8(opening(binary, self._se).astype(np.uint8) * 255)
+                elif op == "Close":
+                    from processing.morphology.opening_closing import closing
+                    result = normalize_to_uint8(closing(binary, self._se).astype(np.uint8) * 255)
+                elif op == "Boundary":
+                    from processing.morphology.boundary_extraction import extract_boundary
+                    result = normalize_to_uint8(extract_boundary(binary, self._se).astype(np.uint8) * 255)
+                else:
+                    _log.error("[ERROR] MorphologyWorker: unknown op '%s'", op)
+                    return
+                label = self._op_name
+
+            _log.debug("[DEBUG] MorphologyWorker.run() emitting: op=%s", label)
+            self.result_ready.emit(label, result)
+        except Exception as e:
+            _log.error("[ERROR] MorphologyWorker: %s", e)
+            self.error.emit(str(e))
+
+
+class SegmentationWorker(QThread):
+    result_ready    = pyqtSignal(str, np.ndarray)
+    threshold_found = pyqtSignal(int)
+    error           = pyqtSignal(str)
+
+    def __init__(self, state, method: str, params: dict, parent=None):
+        super().__init__(parent)
+        self._state  = state
+        self._method = method
+        self._params = params
+
+    def run(self):
+        _log.debug("[DEBUG] SegmentationWorker.run() start: method=%s", self._method)
+        try:
+            image = self._state.get_base_image()
+            if image is None:
+                self.error.emit("No image loaded.")
+                return
+
+            from processing.segmentation.otsu_threshold import (
+                otsu_binarize, adaptive_threshold,
+                multi_level_otsu, apply_colormap_overlay,
+            )
+
+            if self._method == "otsu":
+                binary, t = otsu_binarize(image)
+                result = normalize_to_uint8(binary)
+                self.threshold_found.emit(int(t))
+                _log.debug("[DEBUG] SegmentationWorker emitting: Otsu t=%d", t)
+                self.result_ready.emit(f"Otsu t={t}", result)
+
+            elif self._method == "adaptive":
+                block_size = self._params.get("block_size", 51)
+                C = self._params.get("C", 5.0)
+                result = normalize_to_uint8(adaptive_threshold(image, block_size, C))
+                _log.debug("[DEBUG] SegmentationWorker emitting: Adaptive b=%d", block_size)
+                self.result_ready.emit(
+                    f"Adaptive Threshold b={block_size} C={C:.1f}", result
+                )
+
+            elif self._method == "multi":
+                n_classes     = self._params.get("n_classes", 2)
+                color_overlay = self._params.get("color_overlay", False)
+                thresholds, label_map = multi_level_otsu(image, n_classes)
+                if color_overlay:
+                    result = apply_colormap_overlay(image, label_map)
+                else:
+                    scale = 255 // max(n_classes - 1, 1)
+                    result = normalize_to_uint8(
+                        (label_map.astype(np.float64) * scale).clip(0, 255)
+                    )
+                _log.debug("[DEBUG] SegmentationWorker emitting: Multi-Otsu %d-class", n_classes)
+                self.result_ready.emit(
+                    f"Multi-Otsu {n_classes}-class t={thresholds}", result
+                )
+
+        except Exception as e:
+            _log.error("[ERROR] SegmentationWorker: %s", e)
+            self.error.emit(str(e))
+
 
 class MorphologyPanel(QWidget):
     morphology_applied   = pyqtSignal(str, np.ndarray)
