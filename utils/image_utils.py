@@ -68,4 +68,5 @@ def to_qpixmap(image: np.ndarray) -> QPixmap:
 
 def binarize(image: np.ndarray, threshold: int) -> np.ndarray:
     validate_grayscale(image)
-    return (image > threshold).astype(np.uint8)
+    gray = normalize_to_uint8(image)   
+    return (gray > threshold).astype(np.uint8) #changed by sohaila
