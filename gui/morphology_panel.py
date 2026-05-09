@@ -91,10 +91,6 @@ class MorphologyPanel(QWidget):
         # divider
         layout.addWidget(_hdiv())
 
-        preview_btn = QPushButton("Preview Threshold") #added by sohaila
-        preview_btn.setStyleSheet(btn_style())
-        preview_btn.clicked.connect(self._on_preview_clicked)
-        layout.addWidget(preview_btn)
 
         # ---- structuring element ----
         se_lbl = QLabel("STRUCTURING ELEMENT")
@@ -188,12 +184,7 @@ class MorphologyPanel(QWidget):
         if self._source_image is not None:
             self._binary_image = binarize(self._source_image, value)
 
-    def _on_preview_clicked(self): #added by sohaila
-        if self._binary_image is None:
-            show_error_dialog("No image", "Load an image first.")
-            return
-        preview = normalize_to_uint8(self._binary_image.astype(np.uint8) * 255)
-        self.morphology_applied.emit("Threshold preview", preview)       
+     
 
     def _get_se(self) -> np.ndarray:
         size = 3
