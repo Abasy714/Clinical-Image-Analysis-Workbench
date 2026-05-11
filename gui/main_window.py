@@ -1,734 +1,563 @@
-# STATUS: IMPLEMENTED
-"""
-Main application window for the Clinical Image Analysis Workbench.
-Manages the tabbed interface, global pipeline state, and communication between panels.
-"""
+import time
+import logging
 
-import numpy as np
-from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-                              QSplitter, QMenuBar, QStatusBar, QLabel,
-                              QFileDialog, QApplication, QTabWidget, QFrame,
-                              QScrollArea, QPushButton)
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QFont
+from PyQt6.QtWidgets import (
+    QMainWindow, QSplitter, QTabWidget, QWidget, QVBoxLayout,
+    QLabel, QMessageBox, QApplication, QFileDialog,
+    QFormLayout, QGroupBox,
+)
+from PyQt6.QtCore import Qt, QSettings, QTimer
+from PyQt6.QtGui import QAction, QKeySequence
 
-from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, ACCENT2, TEXT, MUTED, MUTED2, btn_style,
-                        apply_styles)
-from utils import (PipelineState, wrap_errors, show_error_dialog, setup_logger,
-                   normalize_to_uint8, to_grayscale,)
+from utils.pipeline_state import PipelineState
+from utils.error_handler import setup_logger
 
-APP_TITLE = "Clinical Image Analysis Workbench"
-APP_VERSION = "1.0.0"
+import gui.theme as _theme
+from gui.styles import build as _build_ss
+from gui.image_viewer import ImageViewer
+from gui.pipeline_panel import PipelinePanel
+from gui.filter_panel import FilterPanel
+from gui.histogram_panel import HistogramPanel
+from gui.noise_panel import NoisePanel
+from gui.morphology_panel import MorphologyPanel
+from gui.fourier_panel import FourierPanel
+from gui.template_panel import TemplatePanel
+from gui.cv_panel import CVPanel
+from gui.ai_panel import AIPanel
+
+_log = setup_logger()
+_SETTINGS_ORG = 'ciaw'
+_SETTINGS_APP = 'ciaw'
+_SETTINGS_THEME = 'ciaw/theme'
 
 
 class MainWindow(QMainWindow):
-    """Main application window — owns all panels, pipeline state, and signal routing."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._state = PipelineState()
+        self._redo_stack: list = []
+        self._last_op_ms: float = 0.0
+        self._op_start: float = 0.0
+        self._active_workers: int = 0
+        self._spinner_idx: int = 0
+        self._theme_name: str = 'Dark Lime'
+        self._save_path: str | None = None
 
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle(APP_TITLE)
-        self.setMinimumSize(1280, 720)
-
-        self.pipeline = PipelineState()
-        self.logger = setup_logger()
-        self.original_image: np.ndarray | None = None
-        self.current_spatial_image: np.ndarray | None = None
-        self.current_frequency_image: np.ndarray | None = None
-        self.current_binary_image: np.ndarray | None = None
-        self.current_segmentation_image: np.ndarray | None = None
-        self.template_image: np.ndarray | None = None
-        self.display_mode: str = "spatial"
-
-        self._build_menu()
-        self._build_central()
-        self._build_status_bar()
+        self._apply_saved_theme()
+        self._build_ui()
         self._connect_signals()
+        self._start_spinner()
+        self.statusBar().showMessage("Ready")
 
-        from PyQt6.QtGui import QShortcut, QKeySequence
-        ba_shortcut = QShortcut(QKeySequence("B"), self)
-        ba_shortcut.activated.connect(self._image_viewer.toggle_before_after)
+    # ------------------------------------------------------------------
+    # Theme
+    # ------------------------------------------------------------------
 
-        self._apply_stylesheet()
+    def _apply_saved_theme(self):
+        settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        name = settings.value(_SETTINGS_THEME, 'Dark Lime')
+        if name not in _theme.names():
+            name = 'Dark Lime'
+        self._theme_name = name
+        _theme.set_theme(name)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(_build_ss())
 
-    # ------------------------------------------------------------------ build
+    def _apply_theme(self, name: str):
+        if name not in _theme.names():
+            return
+        self._theme_name = name
+        _theme.set_theme(name)
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(_build_ss())
+        p = _theme.get()
+        self._image_viewer.theme_changed(p)
+        if hasattr(self._fourier_panel, 'theme_changed'):
+            self._fourier_panel.theme_changed(p)
+        QSettings(_SETTINGS_ORG, _SETTINGS_APP).setValue(_SETTINGS_THEME, name)
+        self._update_status_bar()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        self.setWindowTitle("Clinical Image Analysis Workbench")
+        self.resize(1400, 900)
+        self._build_menu()
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(1)
+
+        # --- Left panel (320px) ---
+        left = QWidget()
+        left_lyt = QVBoxLayout(left)
+        left_lyt.setContentsMargins(0, 0, 0, 0)
+        left_lyt.setSpacing(0)
+
+        self._pipeline_panel = PipelinePanel()
+        left_lyt.addWidget(self._pipeline_panel, stretch=2)
+
+        self._filter_panel    = FilterPanel()
+        self._histogram_panel = HistogramPanel()
+        self._noise_panel     = NoisePanel()
+        self._morphology_panel = MorphologyPanel()
+        self._fourier_panel   = FourierPanel()
+        self._template_panel  = TemplatePanel()
+        self._cv_panel        = CVPanel()
+        self._ai_panel        = AIPanel()
+
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setDocumentMode(True)
+        self._tab_widget.addTab(self._filter_panel,     "Filter")
+        self._tab_widget.addTab(self._histogram_panel,  "Histogram")
+        self._tab_widget.addTab(self._noise_panel,      "Noise")
+        self._tab_widget.addTab(self._morphology_panel, "Morphology")
+        self._tab_widget.addTab(self._fourier_panel,    "Frequency")
+        self._tab_widget.addTab(self._template_panel,   "Template")
+        self._tab_widget.addTab(self._cv_panel,         "CV")
+        self._tab_widget.addTab(self._ai_panel,         "AI")
+        left_lyt.addWidget(self._tab_widget, stretch=3)
+
+        for panel in (self._filter_panel, self._histogram_panel,
+                      self._noise_panel, self._morphology_panel,
+                      self._fourier_panel, self._template_panel,
+                      self._cv_panel, self._ai_panel):
+            panel.setEnabled(False)
+
+        # --- Center: image viewer ---
+        self._image_viewer = ImageViewer()
+
+        # --- Right panel (280px, metadata + options) ---
+        right = QWidget()
+        right_lyt = QVBoxLayout(right)
+        right_lyt.setContentsMargins(8, 8, 8, 8)
+        right_lyt.setSpacing(6)
+        p = _theme.get()
+
+        hdr_ss = (
+            f"color: {p['ACCENT']}; font-family: 'JetBrains Mono', Consolas, monospace; "
+            f"font-size: 9px; font-weight: bold; letter-spacing: 2px; "
+            f"padding-bottom: 4px; border-bottom: 1px solid {p['BORDER']};"
+        )
+        val_ss = (
+            f"color: {p['TEXT']}; font-family: 'JetBrains Mono', Consolas, monospace; "
+            f"font-size: 9px;"
+        )
+        key_ss = (
+            f"color: {p['MUTED']}; font-family: 'JetBrains Mono', Consolas, monospace; "
+            f"font-size: 9px;"
+        )
+
+        meta_hdr = QLabel("METADATA")
+        meta_hdr.setStyleSheet(hdr_ss)
+        right_lyt.addWidget(meta_hdr)
+
+        meta_form = QFormLayout()
+        meta_form.setSpacing(3)
+        meta_form.setContentsMargins(0, 4, 0, 4)
+
+        def _meta_lbl(text="—"):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(val_ss)
+            lbl.setWordWrap(True)
+            return lbl
+
+        def _key_lbl(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(key_ss)
+            return lbl
+
+        self._meta_file   = _meta_lbl()
+        self._meta_dims   = _meta_lbl()
+        self._meta_ch     = _meta_lbl()
+        self._meta_dtype  = _meta_lbl()
+        self._meta_range  = _meta_lbl()
+        self._meta_size   = _meta_lbl()
+
+        for key, val in [
+            ("File",    self._meta_file),
+            ("Dims",    self._meta_dims),
+            ("Ch",      self._meta_ch),
+            ("DType",   self._meta_dtype),
+            ("Range",   self._meta_range),
+            ("Size",    self._meta_size),
+        ]:
+            meta_form.addRow(_key_lbl(key), val)
+
+        right_lyt.addLayout(meta_form)
+        right_lyt.addStretch()
+
+        splitter.addWidget(left)
+        splitter.addWidget(self._image_viewer)
+        splitter.addWidget(right)
+        splitter.setSizes([320, 800, 280])
+
+        self.setCentralWidget(splitter)
+        self._build_status_bar()
 
     def _build_menu(self):
         mb = self.menuBar()
-        mb.setStyleSheet(
-            f"QMenuBar{{background:#0d0e0c;color:#8a8e84;border-bottom:1px solid {BORDER};padding:2px;}}"
-            f"QMenuBar::item:selected{{background:{INPUT};color:{TEXT};}}"
-            f"QMenu{{background:{PANEL};border:1px solid {BORDER};color:{TEXT};}}"
-            f"QMenu::item:selected{{background:{INPUT};}}"
-        )
 
+        # File
         file_menu = mb.addMenu("File")
-        open_act = QAction("Open…", self)
-        open_act.setShortcut("Ctrl+O")
-        open_act.triggered.connect(lambda: self.load_image())
-        file_menu.addAction(open_act)
+        self._act(file_menu, "Open",    "Ctrl+O", self._open_file)
+        self._act(file_menu, "Save",    "Ctrl+S", self._save_file)
+        self._act(file_menu, "Save As", None,     self._save_file_as)
 
-        save_act = QAction("Save…", self)
-        save_act.setShortcut("Ctrl+S")
-        save_act.triggered.connect(lambda: self.save_image())
-        file_menu.addAction(save_act)
+        # Edit
+        edit_menu = mb.addMenu("Edit")
+        self._act(edit_menu, "Undo",        "Ctrl+Z", self._handle_undo)
+        self._act(edit_menu, "Redo",        "Ctrl+Y", self._handle_redo)
+        edit_menu.addSeparator()
+        self._act(edit_menu, "Preferences", None,     lambda: None)
 
-        file_menu.addSeparator()
-        exit_act = QAction("Exit", self)
-        exit_act.setShortcut("Ctrl+Q")
-        exit_act.triggered.connect(self.close)
-        file_menu.addAction(exit_act)
-
+        # View → Theme submenu
         view_menu = mb.addMenu("View")
+        theme_menu = view_menu.addMenu("Theme")
+        for name in _theme.names():
+            act = QAction(name, self)
+            act.triggered.connect(lambda _, n=name: self._apply_theme(n))
+            theme_menu.addAction(act)
 
-        pipe_menu = mb.addMenu("Pipeline")
-        undo_act = QAction("Undo", self)
-        undo_act.setShortcut("Ctrl+Z")
-        undo_act.triggered.connect(self._do_undo)
-        pipe_menu.addAction(undo_act)
+        # Help
+        help_menu = mb.addMenu("Help")
+        self._act(help_menu, "About", None, self._show_about)
 
-        reset_act = QAction("Reset to original", self)
-        reset_act.triggered.connect(self._do_reset)
-        pipe_menu.addAction(reset_act)
-
-        mb.addMenu("Tools")
-        mb.addMenu("Help")
-
-    def _build_central(self):
-        root = QWidget()
-        root.setStyleSheet(f"background:{BG};")
-        self.setCentralWidget(root)
-        vl = QVBoxLayout(root)
-        vl.setContentsMargins(0, 0, 0, 0)
-        vl.setSpacing(0)
-
-        # title bar
-        title_bar = self._make_title_bar()
-        vl.addWidget(title_bar)
-
-        # splitter
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setStyleSheet(
-            f"QSplitter::handle{{background:{BORDER};}}"
-        )
-
-        # left panel: metadata + pipeline
-        left = QWidget()
-        left.setMinimumWidth(210)
-        left.setMaximumWidth(260)
-        left.setStyleSheet("""
-            QWidget {
-                background-color: #181917;
-                border-right: 1px solid #2c2e2a;
-            }
-        """)
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.setSpacing(0)
-
-        from gui.metadata_panel import MetadataPanel
-        from gui.pipeline_panel import PipelinePanel
-        self._metadata_panel = MetadataPanel()
-        self._pipeline_panel = PipelinePanel(self.pipeline)
-        ll.addWidget(self._metadata_panel)
-        ll.addWidget(self._pipeline_panel, stretch=1)
-        splitter.addWidget(left)
-
-        # center: image viewer
-        from gui.image_viewer import ImageViewer
-        self._image_viewer = ImageViewer()
-        splitter.addWidget(self._image_viewer)
-
-        # right panel: tabs
-        right_tabs = QTabWidget()
-        right_tabs.setMinimumWidth(320)
-        right_tabs.setMaximumWidth(390)
-        right_tabs.setStyleSheet("""
-            QWidget {
-                background-color: #181917;
-            }
-            QTabWidget::pane {
-                background: #181917;
-                border: none;
-                border-left: 1px solid #2c2e2a;
-            }
-            QTabBar {
-                background: #111210;
-                border-bottom: 1px solid #2c2e2a;
-            }
-            QTabBar::tab {
-                background: #111210;
-                color: #6b6f65;
-                border: none;
-                border-bottom: 2px solid transparent;
-                padding: 8px 0;
-                font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-                font-size: 9px;
-                font-weight: bold;
-                letter-spacing: 2px;
-                min-width: 40px;
-            }
-            QTabBar::tab:selected {
-                color: #c8f135;
-                border-bottom: 2px solid #c8f135;
-                background: #111210;
-            }
-            QTabBar::tab:hover:!selected {
-                color: #eceee8;
-                background: #181917;
-            }
-        """)
-
-        from gui.filter_panel import FilterPanel
-        from gui.histogram_panel import HistogramPanel
-        from gui.fourier_panel import FourierPanel
-        from gui.morphology_panel import MorphologyPanel
-        from gui.noise_panel import NoisePanel
-        from gui.template_panel import TemplatePanel
-        from gui.ai_panel import AIPanel
-
-        self._filter_panel = FilterPanel()
-        self._hist_panel = HistogramPanel()
-        self._fourier_panel = FourierPanel()
-        self._morph_panel = MorphologyPanel(state=self.pipeline)
-        self._noise_panel = NoisePanel()
-        self.template_panel = TemplatePanel()
-        self.ai_panel = AIPanel()
-
-        right_tabs.addTab(self._wrap_tool_panel(self._filter_panel), "FILTER")
-        right_tabs.addTab(self._wrap_tool_panel(self._hist_panel), "HIST")
-        right_tabs.addTab(self._wrap_tool_panel(self._fourier_panel), "FREQ")
-        right_tabs.addTab(self._wrap_tool_panel(self._morph_panel), "MORPH")
-        right_tabs.addTab(self._wrap_tool_panel(self._noise_panel), "NOISE")
-        right_tabs.addTab(self._wrap_tool_panel(self.template_panel), "TMPL")
-        right_tabs.addTab(self._wrap_tool_panel(self.ai_panel), "AI")
-        splitter.addWidget(right_tabs)
-
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-
-        self._right_tabs = right_tabs
-        vl.addWidget(splitter, stretch=1)
-
-    def _wrap_tool_panel(self, panel: QWidget) -> QScrollArea:
-        scroll = QScrollArea()
-        scroll.setWidget(panel)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            f"QScrollArea{{background:{PANEL};border:none;}}"
-            f"QScrollBar:vertical{{background:{BG};width:7px;border:none;}}"
-            f"QScrollBar::handle:vertical{{background:{BORDER2};border-radius:3px;min-height:20px;}}"
-            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
-        )
-        return scroll
-
-    def _make_title_bar(self) -> QWidget:
-        bar = QWidget()
-        bar.setFixedHeight(36)
-        bar.setStyleSheet(
-            f"background:#0d0e0c;border-bottom:1px solid {BORDER};"
-        )
-        hl = QHBoxLayout(bar)
-        hl.setContentsMargins(12, 0, 12, 0)
-
-        ver_lbl = QLabel(f"v{APP_VERSION}")
-        ver_lbl.setStyleSheet(f"color:{MUTED2};font-size:9px;")
-        hl.addWidget(ver_lbl)
-
-        hl.addStretch()
-
-        title_lbl = QLabel(f"<span style='color:{ACCENT}'>●</span>  {APP_TITLE}")
-        title_lbl.setStyleSheet(f"color:{TEXT};font-size:11px;font-weight:bold;")
-        hl.addWidget(title_lbl)
-
-        hl.addStretch()
-
-        self._spatial_display_btn = QPushButton("Spatial")
-        self._spatial_display_btn.setCheckable(True)
-        self._spatial_display_btn.setChecked(True)
-        self._spatial_display_btn.setFixedHeight(24)
-        self._spatial_display_btn.setStyleSheet(btn_style())
-        hl.addWidget(self._spatial_display_btn)
-
-        self._frequency_display_btn = QPushButton("Frequency")
-        self._frequency_display_btn.setCheckable(True)
-        self._frequency_display_btn.setChecked(False)
-        self._frequency_display_btn.setFixedHeight(24)
-        self._frequency_display_btn.setStyleSheet(btn_style('ghost'))
-        hl.addWidget(self._frequency_display_btn)
-
-        self._session_lbl = QLabel("SESSION  READY")
-        self._session_lbl.setStyleSheet(
-            f"background:{INPUT};color:{ACCENT};font-size:8px;font-weight:bold;"
-            f"letter-spacing:.1em;padding:2px 8px;border-radius:8px;"
-        )
-        hl.addWidget(self._session_lbl)
-
-        return bar
+    def _act(self, menu, label: str, shortcut, slot):
+        act = QAction(label, self)
+        if shortcut:
+            act.setShortcut(QKeySequence(shortcut))
+        if slot:
+            act.triggered.connect(slot)
+        menu.addAction(act)
+        return act
 
     def _build_status_bar(self):
-        sb = self.statusBar()
-        sb.setStyleSheet(
-            f"QStatusBar{{background:#0d0e0c;border-top:1px solid {BORDER};color:{MUTED};font-size:10px;}}"
-            f"QStatusBar::item{{border:none;}}"
+        p = _theme.get()
+        seg_ss = (
+            f"QLabel {{ color: {p['MUTED']}; "
+            f"font-family: 'JetBrains Mono', Consolas, monospace; "
+            f"font-size: 9px; padding: 0 5px; }}"
+        )
+        sep_ss = (
+            f"QLabel {{ color: {p['BORDER2']}; font-size: 9px; padding: 0 1px; }}"
         )
 
-        def _seg(text: str, fixed_w: int = 0) -> QLabel:
+        def seg(text: str) -> QLabel:
             lbl = QLabel(text)
-            lbl.setStyleSheet(
-                f"color:{MUTED};font-size:9px;padding:0 8px;"
-                f"border-right:1px solid {BORDER};"
-            )
-            if fixed_w:
-                lbl.setFixedWidth(fixed_w)
+            lbl.setStyleSheet(seg_ss)
             return lbl
 
-        self._sb_op    = _seg("OP: —", 160)
-        self._sb_dim   = _seg("—×—", 90)
-        self._sb_zoom  = _seg("100%", 50)
-        self._sb_zoom.setStyleSheet(
-            f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
-            f"border-right:1px solid {BORDER};"
-        )
-        self._sb_interp = _seg("NN", 40)
-        self._sb_roi   = _seg("ROI: none", 100)
-        self._sb_pipe_mode = _seg("PIPE: ON", 90)
-        self._sb_pipe_mode.setStyleSheet(
-            f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
-            f"border-right:1px solid {BORDER};"
-        )
+        def sep() -> QLabel:
+            lbl = QLabel("|")
+            lbl.setStyleSheet(sep_ss)
+            return lbl
 
-        spacer = QWidget()
-        spacer.setSizePolicy(
-            spacer.sizePolicy().horizontalPolicy(),
-            spacer.sizePolicy().verticalPolicy()
-        )
+        self._sb_op     = seg("OP: —")
+        self._sb_interp = seg("NN")
+        self._sb_pipe   = seg("CUM")
+        self._sb_stack  = seg("0 ops")
+        self._sb_mem    = seg("0.0 MB")
+        self._sb_worker = seg("  ")
+        self._sb_time   = seg("—")
+        self._sb_theme  = seg(self._theme_name)
 
-        self._sb_pipe  = _seg("STACK: 0", 80)
-        self._sb_mem   = _seg("MEM: 0KB", 80)
-        self._sb_ready = QLabel("● READY")
-        self._sb_ready.setStyleSheet(f"color:{ACCENT};font-size:9px;font-weight:bold;padding:0 8px;")
-
-        for w in (self._sb_op, self._sb_dim, self._sb_zoom, self._sb_interp, self._sb_roi, self._sb_pipe_mode):
-            sb.addWidget(w)
-        sb.addWidget(spacer, 1)
-        for w in (self._sb_pipe, self._sb_mem, self._sb_ready):
+        sb = self.statusBar()
+        for w in [
+            self._sb_op, sep(), self._sb_interp, sep(), self._sb_pipe, sep(),
+            self._sb_stack, sep(), self._sb_mem, sep(), self._sb_worker, sep(),
+            self._sb_time, sep(), self._sb_theme,
+        ]:
             sb.addPermanentWidget(w)
 
-    def _connect_signals(self):
-        # filter panel
-        self._filter_panel.apply_btn.clicked.connect(self._on_filter_apply)
-        self._filter_panel.kernel_btn.clicked.connect(self._on_kernel_modal)
-        self._filter_panel.filter_applied.connect(self.on_operation_applied)
-        self._filter_panel.operation_failed.connect(
-            lambda _msg: self._image_viewer.show_processing_overlay(False)
-        )
-
-        # histogram panel
-        self._hist_panel.apply_btn.clicked.connect(self._on_hist_apply)
-        self._hist_panel.equalization_applied.connect(self.on_operation_applied)
-
-        # fourier panel
-        self._fourier_panel.apply_btn.clicked.connect(self._fourier_panel.on_apply_clicked)
-        self._fourier_panel.notch_applied.connect(self.on_operation_applied)
-
-        # morphology panel
-        self._morph_panel.morphology_applied.connect(self.on_operation_applied)
-        self._morph_panel.segmentation_applied.connect(self._on_segmentation_applied)
-        self._morph_panel.display_override.connect(self._on_display_override)
-
-        # noise panel
-        self._noise_panel.inject_btn.clicked.connect(self._noise_panel.on_inject_clicked)
-        self._noise_panel.noise_applied.connect(self.on_operation_applied)
-
-        # template panel (Phase 2)
-        self.template_panel.template_match_found.connect(self.on_operation_applied)
-        self.template_panel.template_changed.connect(self._on_template_changed)
-
-        # AI panel (Phase 2 bonus)
-        self.ai_panel.suggestion_applied.connect(self.on_operation_applied)
-
-        # pipeline panel
-        self._pipeline_panel.undo_requested.connect(self._do_undo)
-        self._pipeline_panel.reset_requested.connect(self._do_reset)
-        self._pipeline_panel.checkpoint_save_requested.connect(self._do_checkpoint_save)
-        self._pipeline_panel.checkpoint_restore_requested.connect(self._do_checkpoint_restore)
-        self._pipeline_panel.mode_changed.connect(self._on_pipeline_mode_changed)
-
-        # image viewer
-        self._image_viewer.roi_selected.connect(self._on_roi_selected)
-        self._image_viewer.zoom_changed.connect(
-            lambda z: self._sb_zoom.setText(f"{z}%")
-        )
-        self._image_viewer.interp_changed.connect(
-            lambda m: self._sb_interp.setText(m)
-        )
-
-        # tab change — compute spectrum only when Freq tab is selected
-        self._right_tabs.currentChanged.connect(self._on_tab_changed)
-
-        self._spatial_display_btn.clicked.connect(lambda: self._set_display_mode("spatial"))
-        self._frequency_display_btn.clicked.connect(lambda: self._set_display_mode("frequency"))
-
-    # ------------------------------------------------------------------ actions
-
-    @wrap_errors
-    def load_image(self, filepath: str = None):
-        if filepath is None:
-            import os
-            images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
-            filepath, _ = QFileDialog.getOpenFileName(
-                self, "Open Image", images_dir,
-                "Medical Images (*.dcm *.jpg *.jpeg *.png *.bmp);;All Files (*)"
-            )
-        if not filepath:
-            return
-        from processing.io import load_image
-        loaded = load_image(filepath)
-        if loaded is None:
-            show_error_dialog("Load failed", f"Could not load: {filepath}")
-            return
-        image, metadata = loaded
+    def _update_metadata_panel(self, image: np.ndarray, path: str | None = None):
         if image is None:
-            show_error_dialog("Load failed", f"Could not load: {filepath}")
             return
-        image = self._as_spatial_image(image)
-        self.original_image = image.copy()
-        self.current_spatial_image = image.copy()
-        self.current_binary_image = None
-        self.current_segmentation_image = None
-        self.template_image = None
-        self.display_mode = "spatial"
-        self.pipeline.set_original(image)
-        self._compute_frequency_image(image)
-        self._display_current_image(fit_to_window=True)
-        if hasattr(self._image_viewer, 'set_before_image'):
-            self._image_viewer.set_before_image(image)
-        self._metadata_panel.update_metadata(metadata)
-        self._pipeline_panel.refresh_stack()
-        self._pipeline_panel.update_checkpoints()
-        self._refresh_processing_sources()
-        self._update_display_mode_buttons()
         h, w = image.shape[:2]
-        self._sb_dim.setText(f"{w}×{h}")
-        self._sb_op.setText("OP: load")
-        self._session_lbl.setText("SESSION  ACTIVE")
-        self.logger.info("Loaded image: %s (%dx%d)", filepath, w, h)
+        ch = image.shape[2] if image.ndim == 3 else 1
+        self._meta_file.setText(path.split("\\")[-1].split("/")[-1] if path else "—")
+        self._meta_dims.setText(f"{w} × {h}")
+        self._meta_ch.setText(str(ch))
+        self._meta_dtype.setText(str(image.dtype))
+        self._meta_range.setText(f"{int(image.min())} – {int(image.max())}")
+        kb = image.nbytes / 1024
+        self._meta_size.setText(f"{kb:.0f} KB" if kb < 1024 else f"{kb/1024:.1f} MB")
 
-    @wrap_errors
-    def save_image(self):
-        if not self.pipeline.has_image():
-            show_error_dialog("No Image", "Load an image before saving.")
-            return
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "Save Image", "",
-            "JPEG (*.jpg *.jpeg);;BMP (*.bmp);;PNG (*.png);;All Files (*)"
+    def _update_status_bar(self, *_args):
+        img = self._state.current()
+        stack_len = len(self._state.get_stack_names())
+        mode = self._state.get_mode()
+        mem_mb = img.nbytes / 1024 / 1024 if img is not None else 0.0
+        interp = getattr(self._image_viewer, '_interp', 'nearest')
+
+        self._sb_op.setText(f"OP: {self._state.current_op()}")
+        self._sb_interp.setText("BL" if interp == 'bilinear' else "NN")
+        self._sb_pipe.setText("CUM" if mode == 'cumulative' else "IND")
+        self._sb_stack.setText(f"{stack_len} ops")
+        self._sb_mem.setText(f"{mem_mb:.1f} MB")
+        self._sb_time.setText(
+            f"{self._last_op_ms:.0f} ms" if self._last_op_ms else "—"
         )
-        if not filepath:
-            return
-        from processing.io import save_image
-        current = self.current_spatial_image
-        if current is None:
-            show_error_dialog("No Image", "There is no image to save.")
-            return
-        save_image(current, filepath)
-        self.logger.info("Saved image: %s", filepath)
+        self._sb_theme.setText(self._theme_name)
 
-    def on_operation_applied(self, op_name: str, result: np.ndarray):
-        if result is None or not isinstance(result, np.ndarray):
-            show_error_dialog("Operation Error", f"{op_name} did not return an image.")
-            self._image_viewer.show_processing_overlay(False)
-            return
-        result = normalize_to_uint8(result)
-        self.pipeline.push(op_name, result)
-        self.current_spatial_image = result.copy()
-        if self._is_binary_image(result):
-            self.current_binary_image = result.copy()
-        if any(token in op_name.lower() for token in ("otsu", "threshold", "segment", "multi-otsu")):
-            self.current_segmentation_image = result.copy()
-        self._compute_frequency_image(result)
-        self._display_current_image()
-        self._pipeline_panel.refresh_stack()
-        self._pipeline_panel.update_checkpoints()
-        self._refresh_processing_sources()
+    # ------------------------------------------------------------------
+    # Spinner (WORKER segment)
+    # ------------------------------------------------------------------
 
-        stack_depth = len(self.pipeline.get_stack_names())
-        self._sb_op.setText(f"OP: {op_name[:18]}")
-        self._sb_pipe.setText(f"STACK: {stack_depth}")
-        mem_kb = result.nbytes // 1024
-        self._sb_mem.setText(f"MEM: {mem_kb}KB")
+    _SPINNER = ("●◦◦◦", "◦●◦◦", "◦◦●◦", "◦◦◦●")
 
-        self._image_viewer.show_processing_overlay(False)
+    def _start_spinner(self):
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(150)
+        self._spinner_timer.timeout.connect(self._tick_spinner)
+        self._spinner_timer.start()
 
-        self.logger.info("Operation applied: %s", op_name)
-
-    def _on_segmentation_applied(self, op_name: str, result: np.ndarray):
-        current = self.current_spatial_image
-        if current is not None and hasattr(self._image_viewer, 'set_before_image'):
-            self._image_viewer.set_before_image(current)
-        self.current_segmentation_image = normalize_to_uint8(result)
-        if self._is_binary_image(result):
-            self.current_binary_image = normalize_to_uint8(result)
-        self.on_operation_applied(op_name, result)
-
-    def update_status_bar(self, **kwargs):
-        mapping = {
-            "op":     self._sb_op,
-            "dim":    self._sb_dim,
-            "zoom":   self._sb_zoom,
-            "interp": self._sb_interp,
-            "roi":    self._sb_roi,
-            "pipe":   self._sb_pipe,
-            "mem":    self._sb_mem,
-        }
-        for key, val in kwargs.items():
-            if key in mapping:
-                mapping[key].setText(str(val))
-
-    # ------------------------------------------------------------------ image state
-
-    def _as_spatial_image(self, image: np.ndarray | None) -> np.ndarray | None:
-        if image is None:
-            return None
-        return normalize_to_uint8(to_grayscale(image))
-
-    def _is_binary_image(self, image: np.ndarray | None) -> bool:
-        if image is None:
-            return False
-        gray = self._as_spatial_image(image)
-        values = np.unique(gray)
-        return values.size <= 2 and set(int(v) for v in values).issubset({0, 255})
-
-    def _compute_frequency_image(self, image: np.ndarray | None = None) -> np.ndarray | None:
-        source = self._as_spatial_image(image if image is not None else self.current_spatial_image)
-        if source is None:
-            self.current_frequency_image = None
-            return None
-        try:
-            from processing.frequency.spectrum import compute_spectrum, spectrum_to_display
-            shifted_fft, _log_magnitude, _phase = compute_spectrum(source)
-            self.current_frequency_image = spectrum_to_display(shifted_fft)
-            self._fourier_panel.set_image(source)
-            return self.current_frequency_image
-        except Exception as e:
-            self.logger.error("Frequency image update failed: %s", e)
-            self.current_frequency_image = None
-            return None
-
-    def _refresh_processing_sources(self):
-        display_source = self.current_spatial_image
-        if display_source is None:
-            return
-        operation_source = self.pipeline.get_base_image()
-        if operation_source is None:
-            operation_source = display_source
-        self._morph_panel.set_image(operation_source)
-        self._noise_panel.set_image(operation_source)
-        self._filter_panel.set_current_image(operation_source)
-        try:
-            self.template_panel.set_current_image(display_source)
-        except AttributeError:
-            pass
-        try:
-            self.ai_panel.set_current_image(display_source)
-        except AttributeError:
-            pass
-
-    def _display_current_image(self, fit_to_window: bool = False):
-        if self.display_mode == "frequency":
-            image = self.current_frequency_image
-            if image is None:
-                image = self._compute_frequency_image()
-            if image is None:
-                show_error_dialog("No Frequency Image", "Load an image before switching to frequency display.")
-                self.display_mode = "spatial"
-                self._update_display_mode_buttons()
-                image = self.current_spatial_image
+    def _tick_spinner(self):
+        if self._active_workers > 0:
+            self._spinner_idx = (self._spinner_idx + 1) % 4
+            self._sb_worker.setText(self._SPINNER[self._spinner_idx])
         else:
-            image = self.current_spatial_image
+            self._sb_worker.setText("  ")
 
-        if image is not None:
-            self._image_viewer.set_image(image, fit_to_window=fit_to_window)
+    # ------------------------------------------------------------------
+    # Signal wiring
+    # ------------------------------------------------------------------
 
-    def _set_display_mode(self, mode: str):
-        if mode not in ("spatial", "frequency"):
+    def _connect_signals(self):
+        pp = self._pipeline_panel
+        pp.undo_requested.connect(self._handle_undo)
+        pp.redo_requested.connect(self._handle_redo)
+        pp.reset_requested.connect(self._handle_reset)
+        pp.mode_changed.connect(self._state.set_mode)
+        pp.checkpoint_save_requested.connect(self._handle_checkpoint_save)
+        pp.checkpoint_restore_requested.connect(self._handle_checkpoint_restore)
+        self._image_viewer.interp_changed.connect(self._update_status_bar)
+        self._image_viewer.roi_selected.connect(self._on_roi_selected)
+
+        # pass state to all panels
+        for panel in (self._filter_panel, self._histogram_panel,
+                      self._noise_panel, self._morphology_panel,
+                      self._fourier_panel, self._template_panel,
+                      self._cv_panel, self._ai_panel):
+            panel.set_state(self._state)
+
+        # operation results → pipeline
+        self._filter_panel.filter_applied.connect(self._on_operation_done)
+        self._histogram_panel.operation_applied.connect(self._on_operation_done)
+        self._noise_panel.noise_applied.connect(self._on_operation_done)
+        self._morphology_panel.morphology_applied.connect(self._on_operation_done)
+        self._morphology_panel.segmentation_applied.connect(self._on_operation_done)
+        self._fourier_panel.fourier_applied.connect(self._on_operation_done)
+        self._template_panel.template_applied.connect(self._on_operation_done)
+        self._cv_panel.cv_applied.connect(self._on_operation_done)
+        self._ai_panel.ai_applied.connect(self._on_operation_done)
+
+        # errors
+        for panel in (self._filter_panel, self._histogram_panel,
+                      self._noise_panel, self._morphology_panel,
+                      self._fourier_panel, self._template_panel,
+                      self._cv_panel, self._ai_panel):
+            panel.error_occurred.connect(self._on_error)
+
+        # interpolation
+        self._filter_panel.interp_changed.connect(self._image_viewer.set_interp)
+
+        # AI classification result → status bar
+        self._ai_panel.classification_done.connect(self._on_classification_done)
+
+        # theme propagation
+        self._fourier_panel_theme = self._fourier_panel
+
+    # ------------------------------------------------------------------
+    # Core operation lifecycle  (called by panel workers via _track_worker)
+    # ------------------------------------------------------------------
+
+    def _on_roi_selected(self, x: int, y: int, w: int, h: int):
+        self._noise_panel.set_roi(x, y, w, h)
+        self._cv_panel.set_roi(x, y, w, h)
+        self._ai_panel.set_roi(x, y, w, h)
+
+    def _on_classification_done(self, results: list):
+        if results:
+            top = max(results, key=lambda d: d.get('prob', 0))
+            label = top.get('label', '?')
+            conf  = top.get('prob', 0.0)
+            self._sb_op.setText(f"AI: {label} {conf*100:.1f}%")
+
+    def _on_operation_done(self, op_name: str, result):
+        if result is None:
             return
-        if self.current_spatial_image is None:
-            show_error_dialog("No Image", "Load an image before changing display mode.")
-            self._update_display_mode_buttons()
+        if self._op_start:
+            self._last_op_ms = (time.monotonic() - self._op_start) * 1000
+            self._op_start = 0.0
+        self._active_workers = max(0, self._active_workers - 1)
+        self._redo_stack.clear()
+        before = self._state.current()
+        self._state.push(op_name, result)
+        self._image_viewer.set_image(result)
+        if before is not None:
+            self._image_viewer.store_before(before)
+        self._update_metadata_panel(result)
+        if hasattr(self._histogram_panel, 'refresh'):
+            self._histogram_panel.refresh()
+        if hasattr(self._fourier_panel, 'update_display'):
+            self._fourier_panel.update_display(result)
+        self._pipeline_panel.refresh(
+            self._state.get_stack_names(), self._state.get_mode()
+        )
+        self._update_status_bar()
+
+    def _on_error(self, msg: str):
+        _log.error("Worker error: %s", msg)
+        self._active_workers = max(0, self._active_workers - 1)
+        QMessageBox.warning(self, "Operation Error", msg)
+
+    def _track_worker(self, worker):
+        """Register a PipelineWorker: increments active count, starts timing."""
+        self._active_workers += 1
+        self._op_start = time.monotonic()
+        worker.finished.connect(self._on_operation_done)
+        worker.error.connect(self._on_error)
+
+    # ------------------------------------------------------------------
+    # Undo / Redo / Reset
+    # ------------------------------------------------------------------
+
+    def _handle_undo(self):
+        if not self._state.has_image():
             return
-        self.display_mode = mode
-        if mode == "frequency":
-            self._compute_frequency_image()
-        self._update_display_mode_buttons()
-        self._display_current_image(fit_to_window=True)
-        self._sb_op.setText(f"OP: display {mode}")
-        self.logger.info("Display mode: %s", mode)
+        if self._state.get_stack_names():
+            self._redo_stack.append(
+                (self._state.current_op(), self._state.current().copy())
+            )
+        result = self._state.undo()
+        if result is not None:
+            self._image_viewer.set_image(result)
+        self._pipeline_panel.refresh(
+            self._state.get_stack_names(), self._state.get_mode()
+        )
+        self._update_status_bar()
 
-    def _update_display_mode_buttons(self):
-        is_spatial = self.display_mode == "spatial"
-        self._spatial_display_btn.setChecked(is_spatial)
-        self._frequency_display_btn.setChecked(not is_spatial)
-        self._spatial_display_btn.setStyleSheet(btn_style() if is_spatial else btn_style('ghost'))
-        self._frequency_display_btn.setStyleSheet(btn_style() if not is_spatial else btn_style('ghost'))
+    def _handle_redo(self):
+        if not self._redo_stack:
+            return
+        op_name, img = self._redo_stack.pop()
+        self._state.push(op_name, img)
+        self._image_viewer.set_image(img)
+        self._pipeline_panel.refresh(
+            self._state.get_stack_names(), self._state.get_mode()
+        )
+        self._update_status_bar()
 
-    def _on_display_override(self, image: np.ndarray):
+    def _handle_reset(self):
+        self._state.reset()
+        self._redo_stack.clear()
+        img = self._state.current()
+        if img is not None:
+            self._image_viewer.set_image(img)
+        self._pipeline_panel.refresh(
+            self._state.get_stack_names(), self._state.get_mode()
+        )
+        self._update_status_bar()
+
+    # ------------------------------------------------------------------
+    # Checkpoints
+    # ------------------------------------------------------------------
+
+    def _handle_checkpoint_save(self, slot: str):
+        if not self._state.has_image():
+            return
+        try:
+            self._state.save_checkpoint(slot)
+        except ValueError as exc:
+            _log.warning("Checkpoint save failed: %s", exc)
+
+    def _handle_checkpoint_restore(self, slot: str):
+        img = self._state.restore_checkpoint(slot)
+        if img is not None:
+            self._image_viewer.set_image(img)
+            self._pipeline_panel.refresh(
+                self._state.get_stack_names(), self._state.get_mode()
+            )
+            self._update_status_bar()
+
+    # ------------------------------------------------------------------
+    # File I/O  (processing.io imported lazily to keep top-level clean)
+    # ------------------------------------------------------------------
+
+    def _open_file(self):
+        from processing.io.image_loader import load_image
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Image", "",
+            "Images (*.dcm *.jpg *.jpeg *.png *.bmp);;All Files (*)",
+        )
+        if not path:
+            return
+        result = load_image(path)
+        if result is None:
+            return
+        image, _metadata = result
+        self._state.set_original(image)
+        self._redo_stack.clear()
         self._image_viewer.set_image(image)
+        self._image_viewer.store_before(image)
+        self._update_metadata_panel(image, path)
 
-    def _on_template_changed(self, image: np.ndarray):
-        self.template_image = self._as_spatial_image(image)
+        for panel in (self._filter_panel, self._histogram_panel,
+                      self._noise_panel, self._morphology_panel,
+                      self._fourier_panel, self._template_panel,
+                      self._cv_panel, self._ai_panel):
+            panel.setEnabled(True)
+            panel.set_state(self._state)
 
-    # ------------------------------------------------------------------ panel dispatch
+        if hasattr(self._histogram_panel, 'refresh'):
+            self._histogram_panel.refresh()
+        if hasattr(self._fourier_panel, 'update_display'):
+            self._fourier_panel.update_display(image)
 
-    def _on_filter_apply(self):
-        image = self.pipeline.get_base_image()
-        if image is None:
-            show_error_dialog("No Image", "Load an image before applying a filter.")
-            return
-        self._image_viewer.show_processing_overlay(True)
-        self._filter_panel.set_current_image(image)
-        self._filter_panel.on_apply_clicked(image)
+        self._pipeline_panel.refresh(
+            self._state.get_stack_names(), self._state.get_mode()
+        )
+        self._update_status_bar()
+        self.statusBar().showMessage(f"Opened: {path}", 3000)
 
-    def _on_kernel_modal(self):
-        image = self.pipeline.get_base_image()
-        if image is None:
-            show_error_dialog("No Image", "Load an image before editing a kernel.")
-            return
-        self._filter_panel.open_kernel_modal(image)
-
-    def _on_hist_apply(self):
-        image = self.pipeline.get_base_image()
-        if image is None:
-            show_error_dialog("No Image", "Load an image before applying histogram equalization.")
-            return
-        self._hist_panel.on_apply_clicked(image)
-
-    def _on_pipeline_mode_changed(self, mode: str):
-        """Switch pipeline mode (cumulative/independent) and update UI."""
-        self.pipeline.set_mode(mode)
-        if mode == 'cumulative':
-            self._sb_pipe_mode.setText("PIPE: ON")
-            self._sb_pipe_mode.setStyleSheet(
-                f"color:{ACCENT};font-size:10px;font-weight:bold;padding:0 8px;"
-                f"border-right:1px solid {BORDER};"
-            )
+    def _save_file(self):
+        if self._save_path:
+            self._do_save(self._save_path)
         else:
-            self._sb_pipe_mode.setText("PIPE: OFF")
-            self._sb_pipe_mode.setStyleSheet(
-                "color:#f5a623;font-size:10px;font-weight:bold;padding:0 8px;"
-                f"border-right:1px solid {BORDER};"
-            )
-        # Update panels' source image to the new base
-        base = self.pipeline.get_base_image()
-        if base is not None:
-            self._refresh_processing_sources()
-        self.logger.info(f"Pipeline mode: {mode}")
+            self._save_file_as()
 
-    def _on_roi_selected(self, roi):
-        try:
-            if roi is not None and roi.width() > 0 and roi.height() > 0:
-                self._sb_roi.setText(f"ROI: {roi.width()}×{roi.height()}")
+    def _save_file_as(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Image", "",
+            "JPEG (*.jpg);;PNG (*.png);;BMP (*.bmp);;All Files (*)",
+        )
+        if path:
+            self._save_path = path
+            self._do_save(path)
 
-            image = self.current_spatial_image
-            if image is None:
-                return
-
-            try:
-                self._hist_panel.update_roi(image, roi)
-            except Exception as e:
-                import logging
-                logging.getLogger('ciaw').error(f"histogram ROI not ready: {e}")
-
-            try:
-                self._noise_panel.update_roi_stats(image, roi)
-            except Exception as e:
-                import logging
-                logging.getLogger('ciaw').error(f"noise ROI stats not ready: {e}")
-
-            try:
-                self.template_panel.set_template_from_roi(image, roi)
-            except Exception as e:
-                import logging
-                logging.getLogger('ciaw').error(f"template ROI not ready: {e}")
-
-            try:
-                self.ai_panel.set_current_roi(roi)
-            except AttributeError:
-                pass
-
-        except Exception as e:
-            import logging
-            logging.getLogger('ciaw').error(f"_on_roi_selected error: {e}")
-
-    def _do_undo(self):
-        if not self.pipeline.has_image():
-            show_error_dialog("No Image", "Load an image before using undo.")
+    def _do_save(self, path: str):
+        from processing.io.image_saver import save_image
+        img = self._state.current()
+        if img is None:
+            QMessageBox.warning(self, "Save", "No image to save.")
             return
-        image = self.pipeline.undo()
-        self.current_spatial_image = normalize_to_uint8(image) if image is not None else None
-        self._compute_frequency_image(self.current_spatial_image)
-        self._display_current_image()
-        self._refresh_processing_sources()
-        self._pipeline_panel.refresh_stack()
-        stack_depth = len(self.pipeline.get_stack_names())
-        self._sb_pipe.setText(f"STACK: {stack_depth}")
+        save_image(img, path)
+        self.statusBar().showMessage(f"Saved: {path}", 3000)
 
-    def _do_reset(self):
-        if not self.pipeline.has_image():
-            show_error_dialog("No Image", "Load an image before resetting.")
-            return
-        image = self.pipeline.reset()
-        self.current_spatial_image = normalize_to_uint8(image) if image is not None else None
-        self.current_binary_image = None
-        self.current_segmentation_image = None
-        self._compute_frequency_image(self.current_spatial_image)
-        self._display_current_image(fit_to_window=True)
-        self._refresh_processing_sources()
-        if hasattr(self._image_viewer, 'set_before_image'):
-            self._image_viewer.set_before_image(image)
-        self._pipeline_panel.refresh_stack()
-        self._sb_op.setText("OP: reset")
-        self._sb_pipe.setText("STACK: 0")
+    # ------------------------------------------------------------------
+    # About
+    # ------------------------------------------------------------------
 
-    def _do_checkpoint_save(self, slot: str):
-        if not self.pipeline.has_image():
-            show_error_dialog("No Image", "Load an image before saving a checkpoint.")
-            return
-        self.pipeline.save_checkpoint(slot)
-        self._pipeline_panel.update_checkpoints()
-
-    def _do_checkpoint_restore(self, slot: str):
-        image = self.pipeline.restore_checkpoint(slot)
-        if image is not None:
-            self.current_spatial_image = normalize_to_uint8(image)
-            self._compute_frequency_image(self.current_spatial_image)
-            self._display_current_image()
-            self._refresh_processing_sources()
-            self._pipeline_panel.refresh_stack()
-            self._pipeline_panel.update_checkpoints()
-
-    def _on_tab_changed(self, index: int):
-        tab_text = self._right_tabs.tabText(index).strip().upper()
-        if tab_text == "FREQ":
-            image = self.current_spatial_image
-            if image is not None:
-                try:
-                    self._compute_frequency_image(image)
-                except ImportError:
-                    # Phase 2 not implemented yet — no dialog
-                    pass
-                except Exception:
-                    pass
-
-    # ------------------------------------------------------------------ stylesheet
-
-    def _apply_stylesheet(self):
-        self.setStyleSheet(
-            f"QMainWindow{{background:{BG};}}"
-            f"QWidget{{background:{BG};color:{TEXT};"
-            f"font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-size:11px;}}"
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "About CIAW",
+            "Clinical Image Analysis Workbench\n"
+            "Digital Image Processing Project\n\n"
+            "Spatial · Frequency · Morphology · Noise\n"
+            "Deep Learning · Histogram · Segmentation",
         )

@@ -21,7 +21,7 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from utils import setup_logger
 from gui.styles import apply_styles
-from gui import MainWindow
+from gui.main_window import MainWindow
 
 
 def main():

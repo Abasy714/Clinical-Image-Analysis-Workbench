@@ -267,3 +267,86 @@ def apply_styles(app) -> None:
     font.setStyleHint(QFont.StyleHint.Monospace)
     app.setFont(font)
     app.setStyleSheet(MAIN_STYLE)
+
+
+def build() -> str:
+    from gui.theme import get
+    p = get()
+    return f"""
+QMainWindow, QWidget {{
+    background-color: {p['BG']};
+    color: {p['TEXT']};
+    font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    font-size: 11px;
+}}
+QMenuBar {{
+    background-color: {p['BG']};
+    color: {p['MUTED']};
+    border-bottom: 1px solid {p['BORDER']};
+    padding: 2px;
+}}
+QMenuBar::item:selected {{ background: {p['INPUT']}; color: {p['TEXT']}; }}
+QMenu {{ background: {p['PANEL']}; border: 1px solid {p['BORDER']}; color: {p['TEXT']}; }}
+QMenu::item:selected {{ background: {p['INPUT']}; }}
+QStatusBar {{
+    background: {p['BG']};
+    border-top: 1px solid {p['BORDER']};
+    color: {p['MUTED']};
+    font-size: 10px;
+}}
+QStatusBar::item {{ border: none; }}
+QScrollBar:vertical {{ background: {p['BG']}; width: 6px; border: none; }}
+QScrollBar::handle:vertical {{ background: {p['BORDER']}; border-radius: 3px; min-height: 20px; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{ background: {p['BG']}; height: 6px; border: none; }}
+QScrollBar::handle:horizontal {{ background: {p['BORDER']}; border-radius: 3px; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+QComboBox {{
+    background: {p['INPUT']}; border: 1px solid {p['BORDER2']}; border-radius: 2px;
+    color: {p['TEXT']}; padding: 4px 8px; font-family: inherit;
+}}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox QAbstractItemView {{
+    background: {p['PANEL']}; border: 1px solid {p['BORDER2']}; color: {p['TEXT']};
+    selection-background-color: {p['INPUT']};
+}}
+QLineEdit, QSpinBox, QDoubleSpinBox {{
+    background: {p['INPUT']}; border: 1px solid {p['BORDER2']}; border-radius: 2px;
+    color: {p['TEXT']}; padding: 4px 8px; font-family: inherit;
+}}
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{ border-color: {p['ACCENT']}; }}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    background: {p['BORDER2']}; border: none; width: 14px;
+}}
+QSlider::groove:horizontal {{ height: 3px; background: {p['BORDER2']}; border-radius: 2px; }}
+QSlider::handle:horizontal {{
+    width: 12px; height: 12px; margin: -5px 0;
+    background: {p['ACCENT']}; border-radius: 6px; border: 2px solid {p['BG']};
+}}
+QSlider::sub-page:horizontal {{ background: {p['ACCENT']}; border-radius: 2px; }}
+QTabWidget::pane {{ border: none; background: {p['PANEL']}; }}
+QTabBar::tab {{
+    background: {p['PANEL']}; color: {p['MUTED']}; border: none;
+    padding: 8px 12px; font-size: 9px; font-weight: bold;
+    letter-spacing: 0.12em; border-bottom: 2px solid transparent;
+}}
+QTabBar::tab:selected {{ color: {p['ACCENT']}; border-bottom-color: {p['ACCENT']}; }}
+QTabBar::tab:hover {{ color: {p['TEXT']}; }}
+QListWidget {{ background: {p['BG']}; border: none; color: {p['TEXT']}; outline: none; }}
+QListWidget::item {{ padding: 5px 8px; border-bottom: 1px solid {p['BORDER']}; }}
+QListWidget::item:selected {{ background: {p['PANEL2']}; color: {p['ACCENT']}; border: none; }}
+QTableWidget {{ background: {p['BG']}; border: none; gridline-color: {p['BORDER']}; color: {p['TEXT']}; }}
+QTableWidget::item {{ padding: 3px 6px; border: none; }}
+QHeaderView::section {{ background: {p['PANEL']}; color: {p['MUTED']}; border: none; padding: 4px; }}
+QDialog {{ background: {p['BG']}; color: {p['TEXT']}; }}
+QGroupBox {{
+    border: 1px solid {p['BORDER']}; border-radius: 2px;
+    margin-top: 6px; padding-top: 6px; color: {p['MUTED']}; font-size: 9px;
+}}
+QGroupBox::title {{ subcontrol-origin: margin; left: 8px; color: {p['MUTED']}; }}
+QToolTip {{
+    background: {p['PANEL']}; color: {p['TEXT']};
+    border: 1px solid {p['BORDER']}; font-size: 10px;
+}}
+"""

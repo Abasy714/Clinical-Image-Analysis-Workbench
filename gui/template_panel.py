@@ -1,213 +1,218 @@
-"""
-Template matching panel.
-User crops a template from the image ROI, then finds matching regions in the
-current source image using normalized cross-correlation.
-"""
-
-import logging
 import numpy as np
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFrame,
-    QDoubleSpinBox, QSpinBox, QFileDialog,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QComboBox, QFileDialog,
 )
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap
 
-try:
-    from gui.styles import (
-        HEADER_SS, FIELD_SS, APPLY_BTN_SS, ACCENT, BORDER, SPINBOX_SS,
-    )
-except ImportError:
-    HEADER_SS = FIELD_SS = APPLY_BTN_SS = SPINBOX_SS = ""
-    ACCENT = "#c8f135"
-    BORDER = "#2c2e2a"
+from gui.theme import get as _get_theme
+from gui.styles import btn_style, COMBO_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.workers import PipelineWorker
 
-from utils import show_error_dialog
 
-_log = logging.getLogger('ciaw')
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
 
+def _qimage_to_gray(path: str) -> np.ndarray | None:
+    img = QImage(path)
+    if img.isNull():
+        return None
+    gray = img.convertToFormat(QImage.Format.Format_Grayscale8)
+    w, h = gray.width(), gray.height()
+    ptr = gray.bits()
+    ptr.setsize(h * w)
+    return np.frombuffer(ptr, dtype=np.uint8).reshape(h, w).copy()
+
+
+def _gray_to_qpixmap(arr: np.ndarray, max_size: int = 120) -> QPixmap:
+    h, w = arr.shape[:2]
+    img = QImage(arr.data, w, h, w, QImage.Format.Format_Grayscale8)
+    pix = QPixmap.fromImage(img)
+    if w > max_size or h > max_size:
+        pix = pix.scaled(max_size, max_size,
+                         Qt.AspectRatioMode.KeepAspectRatio,
+                         Qt.TransformationMode.FastTransformation)
+    return pix
+
+
+def _fft_match_fn(image, template):
+    from processing.frequency.template_matching import fourier_cross_correlate
+    return fourier_cross_correlate(image, template)
+
+
+def _ncc_match_fn(image, template):
+    from processing.frequency.template_matching import normalized_cross_correlation
+    return normalized_cross_correlation(image, template)
+
+
+# ------------------------------------------------------------------
+# TemplatePanel
+# ------------------------------------------------------------------
 
 class TemplatePanel(QWidget):
-    """Template matching panel - crop from ROI, then locate in the image."""
-
-    template_match_found = pyqtSignal(str, np.ndarray)
-    template_changed = pyqtSignal(np.ndarray)
+    template_applied = pyqtSignal(str, np.ndarray)
+    error_occurred   = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._state = None
+        self._worker: PipelineWorker | None = None
         self._template: np.ndarray | None = None
-        self._current_image: np.ndarray | None = None
-        self._last_roi = None
-        self._last_roi_image: np.ndarray | None = None
         self._build_ui()
 
+    def set_state(self, state):
+        self._state = state
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
     def _build_ui(self):
+        p = _get_theme()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
-        header = QLabel("TEMPLATE MATCHING")
-        header.setStyleSheet(HEADER_SS)
-        layout.addWidget(header)
+        layout.addWidget(self._header("TEMPLATE"))
 
-        step1 = QLabel("STEP 1 - Crop template from image")
-        step1.setStyleSheet(FIELD_SS)
-        layout.addWidget(step1)
+        load_btn = QPushButton("LOAD TEMPLATE")
+        load_btn.setStyleSheet(btn_style('default'))
+        load_btn.clicked.connect(self._load_template)
+        layout.addWidget(load_btn)
 
-        self._crop_btn = QPushButton("Crop from current ROI")
-        self._crop_btn.setStyleSheet(APPLY_BTN_SS)
-        self._crop_btn.clicked.connect(self._on_crop_clicked)
-        layout.addWidget(self._crop_btn)
-
-        self._load_template_btn = QPushButton("Load Template Image")
-        self._load_template_btn.setStyleSheet(APPLY_BTN_SS)
-        self._load_template_btn.clicked.connect(self._on_load_template_clicked)
-        layout.addWidget(self._load_template_btn)
-
-        self._template_status = QLabel("No template selected")
-        self._template_status.setStyleSheet("color: #6b6f65; font-size: 9px;")
-        layout.addWidget(self._template_status)
-
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background: {BORDER};")
-        layout.addWidget(sep)
-
-        step2 = QLabel("STEP 2 - Find template in image")
-        step2.setStyleSheet(FIELD_SS)
-        layout.addWidget(step2)
-
-        threshold_row = QWidget()
-        trl = QHBoxLayout(threshold_row)
-        trl.setContentsMargins(0, 0, 0, 0)
-        trl.setSpacing(6)
-        threshold_lbl = QLabel("Threshold")
-        threshold_lbl.setStyleSheet(FIELD_SS)
-        trl.addWidget(threshold_lbl)
-        self._threshold_spin = QDoubleSpinBox()
-        self._threshold_spin.setRange(0.10, 1.00)
-        self._threshold_spin.setDecimals(2)
-        self._threshold_spin.setSingleStep(0.05)
-        self._threshold_spin.setValue(0.80)
-        self._threshold_spin.setStyleSheet(SPINBOX_SS)
-        trl.addWidget(self._threshold_spin)
-        layout.addWidget(threshold_row)
-
-        max_row = QWidget()
-        mrl = QHBoxLayout(max_row)
-        mrl.setContentsMargins(0, 0, 0, 0)
-        mrl.setSpacing(6)
-        max_lbl = QLabel("Max boxes")
-        max_lbl.setStyleSheet(FIELD_SS)
-        mrl.addWidget(max_lbl)
-        self._max_matches_spin = QSpinBox()
-        self._max_matches_spin.setRange(1, 25)
-        self._max_matches_spin.setValue(5)
-        self._max_matches_spin.setStyleSheet(SPINBOX_SS)
-        mrl.addWidget(self._max_matches_spin)
-        layout.addWidget(max_row)
-
-        self._find_btn = QPushButton("Find Template")
-        self._find_btn.setStyleSheet(APPLY_BTN_SS)
-        self._find_btn.clicked.connect(self._on_find_clicked)
-        layout.addWidget(self._find_btn)
-
-        self._result_label = QLabel("No match found yet")
-        self._result_label.setStyleSheet("color: #6b6f65; font-size: 9px;")
-        layout.addWidget(self._result_label)
-
-        self._confidence_label = QLabel("Best NCC score: -")
-        self._confidence_label.setStyleSheet(
-            f"color: {ACCENT}; font-size: 11px; font-weight: bold;"
+        self._thumb_lbl = QLabel()
+        self._thumb_lbl.setFixedSize(120, 120)
+        self._thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_lbl.setStyleSheet(
+            f"QLabel {{ background: {p['PANEL2']}; border: 1px solid {p['BORDER']}; }}"
         )
-        layout.addWidget(self._confidence_label)
+        layout.addWidget(self._thumb_lbl)
+
+        self._info_lbl = QLabel("No template loaded")
+        self._info_lbl.setStyleSheet(FIELD_SS)
+        self._info_lbl.setWordWrap(True)
+        layout.addWidget(self._info_lbl)
+
+        layout.addWidget(self._header("METHOD"))
+        self._method_combo = QComboBox()
+        self._method_combo.setStyleSheet(COMBO_SS)
+        self._method_combo.addItem("FFT Cross-Correlation")
+        self._method_combo.addItem("Normalized CC")
+        layout.addWidget(self._method_combo)
+
+        find_btn = QPushButton("FIND MATCH")
+        find_btn.setStyleSheet(APPLY_BTN_SS)
+        find_btn.clicked.connect(self._find_match)
+        layout.addWidget(find_btn)
+
+        layout.addWidget(self._header("RESULT"))
+
+        row_w, self._row_lbl   = self._stat_row("Row")
+        col_w, self._col_lbl   = self._stat_row("Col")
+        conf_w, self._conf_lbl = self._stat_row("Confidence")
+        layout.addWidget(row_w)
+        layout.addWidget(col_w)
+        layout.addWidget(conf_w)
 
         layout.addStretch()
 
-    def set_current_image(self, image: np.ndarray):
-        self._current_image = image
+    def _lbl(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(FIELD_SS)
+        return lbl
 
-    def set_template_from_roi(self, image: np.ndarray, roi):
-        self._last_roi = roi
-        self._last_roi_image = image
-        if roi is None or roi.width() == 0 or roi.height() == 0:
-            return
-        try:
-            self._crop_template_from_roi(image, roi)
-        except Exception as e:
-            _log.error("template ROI crop failed: %s", e)
+    def _header(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(HEADER_SS)
+        return lbl
 
-    def _crop_template_from_roi(self, image: np.ndarray, roi):
-        if image is None:
-            raise ValueError("Load an image before selecting a template.")
-        x, y, w, h = roi.x(), roi.y(), roi.width(), roi.height()
-        img_h, img_w = image.shape[:2]
-        x1, y1 = max(0, x), max(0, y)
-        x2, y2 = min(img_w, x + w), min(img_h, y + h)
-        if x2 - x1 < 2 or y2 - y1 < 2:
-            raise ValueError("Template ROI must be at least 2x2 pixels.")
-        self._template = image[y1:y2, x1:x2].copy()
-        self._template_status.setText(f"Template: {x2 - x1}x{y2 - y1} px")
-        self.template_changed.emit(self._template)
-
-    def _on_crop_clicked(self):
-        if self._last_roi is None or self._last_roi_image is None:
-            show_error_dialog("No ROI", "Draw an ROI on the image first, then crop the template.")
-            return
-        try:
-            self._crop_template_from_roi(self._last_roi_image, self._last_roi)
-            _log.info("Template cropped from current ROI.")
-        except Exception as e:
-            _log.error("template crop error: %s", e)
-            show_error_dialog("Template Crop Error", str(e))
-
-    def _on_load_template_clicked(self):
-        filepath, _ = QFileDialog.getOpenFileName(
-            self, "Open Template Image", "",
-            "Images (*.dcm *.jpg *.jpeg *.png *.bmp);;All Files (*)"
+    def _stat_row(self, label: str):
+        p = _get_theme()
+        row = QWidget()
+        row_lyt = QHBoxLayout(row)
+        row_lyt.setContentsMargins(0, 2, 0, 2)
+        name_lbl = QLabel(label)
+        name_lbl.setStyleSheet(FIELD_SS)
+        val_lbl = QLabel("---")
+        val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        val_lbl.setStyleSheet(
+            f"color: {p['TEXT']}; font-family: 'JetBrains Mono', Consolas, monospace; "
+            f"font-size: 10px;"
         )
-        if not filepath:
-            return
-        try:
-            from processing.io import load_image
-            loaded = load_image(filepath)
-            if loaded is None:
-                raise ValueError(f"Could not load template: {filepath}")
-            image, _metadata = loaded
-            if image is None:
-                raise ValueError(f"Could not load template: {filepath}")
-            self._template = image.copy()
-            h, w = self._template.shape[:2]
-            self._template_status.setText(f"Template file: {w}x{h} px")
-            self.template_changed.emit(self._template)
-        except Exception as e:
-            _log.error("template load error: %s", e)
-            show_error_dialog("Template Load Error", str(e))
+        row_lyt.addWidget(name_lbl)
+        row_lyt.addWidget(val_lbl)
+        return row, val_lbl
 
-    def _on_find_clicked(self):
+    # ------------------------------------------------------------------
+    # Load template
+    # ------------------------------------------------------------------
+
+    def _load_template(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Template", "",
+            "Images (*.jpg *.jpeg *.png *.bmp);;All Files (*)",
+        )
+        if not path:
+            return
+        arr = _qimage_to_gray(path)
+        if arr is None:
+            self._info_lbl.setText("Failed to load image.")
+            return
+        self._template = arr
+        pix = _gray_to_qpixmap(arr)
+        self._thumb_lbl.setPixmap(pix)
+        import os
+        fname = os.path.basename(path)
+        self._info_lbl.setText(f"{fname}\n{arr.shape[1]}×{arr.shape[0]} px")
+
+    # ------------------------------------------------------------------
+    # Find match
+    # ------------------------------------------------------------------
+
+    def _find_match(self):
+        if self._state is None:
+            return
         if self._template is None:
-            show_error_dialog("No Template", "Draw an ROI first to define the template.")
+            self._info_lbl.setText("Load a template first.")
             return
-        if self._current_image is None:
-            show_error_dialog("No Image", "Load an image first.")
+        if self._worker and self._worker.isRunning():
             return
 
-        try:
-            from processing.frequency import match_template
+        method = self._method_combo.currentText()
+        fn = _fft_match_fn if method == "FFT Cross-Correlation" else _ncc_match_fn
 
-            result, matches, _score_map = match_template(
-                self._current_image,
-                self._template,
-                threshold=self._threshold_spin.value(),
-                max_matches=self._max_matches_spin.value(),
-            )
-            best = matches[0]
-            self._result_label.setText(
-                f"{len(matches)} match(es), best row={best['row']}, col={best['col']}"
-            )
-            self._confidence_label.setText(f"Best NCC score: {best['score']:.3f}")
-            self.template_match_found.emit(
-                f"Template Match r={best['row']} c={best['col']}", result
-            )
-        except Exception as e:
-            _log.error("template matching error: %s", e)
-            show_error_dialog("Template Matching Error", str(e))
+        self._worker = PipelineWorker(fn, "Template Match", self._state,
+                                      template=self._template.copy())
+        self._worker.finished.connect(self._on_match_done)
+        self._worker.error.connect(self.error_occurred)
+        self._worker.start()
+
+    def _on_match_done(self, _op_name: str, corr_map: np.ndarray):
+        from processing.frequency.template_matching import find_best_match, draw_matches
+
+        row, col = find_best_match(corr_map)
+        row, col = int(row), int(col)
+
+        max_val = float(corr_map.max())
+        score   = float(corr_map[row, col])
+        confidence = score / max_val if max_val > 1e-10 else 0.0
+
+        t_h, t_w = self._template.shape[:2]
+        match = {
+            "row": row, "col": col,
+            "height": t_h, "width": t_w,
+            "score": confidence,
+        }
+
+        img = self._state.current()
+        if img is None:
+            return
+        annotated = draw_matches(img, [match])
+
+        self._row_lbl.setText(str(row))
+        self._col_lbl.setText(str(col))
+        self._conf_lbl.setText(f"{confidence:.3f}")
+
+        self.template_applied.emit("Template Match", annotated)

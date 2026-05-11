@@ -14,6 +14,7 @@ def adaptive_median_filter(
     image: np.ndarray,
     s_min: int = 3,
     s_max: int = 7,
+    max_window: int | None = None,
 ) -> np.ndarray:
     """
     Apply an adaptive median filter to a grayscale image from scratch.
@@ -47,6 +48,9 @@ def adaptive_median_filter(
     -------
     output : 2D uint8 array (H, W), same size as input
     """
+    if max_window is not None:
+        s_max = max_window
+
     validate_grayscale(image)
 
     if s_min < 3 or s_min % 2 == 0:

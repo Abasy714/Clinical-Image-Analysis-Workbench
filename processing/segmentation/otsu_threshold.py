@@ -52,19 +52,8 @@ def otsu_threshold(image: np.ndarray) -> int:
 def otsu_binarize(image: np.ndarray) -> tuple:
 
     image_u8 = _as_gray_u8(image)
-
-    try:
-        import cv2
-        t, binary = cv2.threshold(
-            image_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
-        return binary.astype(np.uint8), int(round(float(t)))
-    except Exception:
-        pass
-
     t      = otsu_threshold(image_u8)
     binary = (image_u8 > t).astype(np.uint8) * 255
-
     return binary, t
 
 
