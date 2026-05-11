@@ -1,23 +1,43 @@
-﻿"""
-Computes and formats the FFT magnitude spectrum of an image for display.
+"""
+Computes and formats the FFT magnitude and phase spectrum of an image for display.
 Uses numpy's fft2 and fftshift — permitted built-ins for frequency domain work.
 """
 
-# numpy — fft2, ifft2, fftshift, ifftshift, log scaling, array ops
+import numpy as np
+from utils.image_utils import validate_grayscale, normalize_to_uint8
+from utils.error_handler import wrap_errors
 
-# FUNCTIONS
-# def compute_spectrum(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-#   — apply fft2 -> fftshift -> return (shifted_fft, log_magnitude_display)
-# def spectrum_to_display(shifted_fft: np.ndarray) -> np.ndarray:
-#   — compute log(1 + |F|) -> normalize to 0-255 for display
-# def inverse_spectrum(shifted_fft: np.ndarray) -> np.ndarray:
-#   — ifftshift -> ifft2 -> take real part -> clip to valid range
 
-# --- UTIL USAGE GUIDE ---
-# from utils.image_utils import validate_grayscale, normalize_to_uint8
-# from utils.error_handler import wrap_errors
-#
-# validate_grayscale(image)           # call at the top of compute_spectrum
-# normalize_to_uint8(display)         # call on the log-magnitude array inside spectrum_to_display
-# normalize_to_uint8(spatial)         # call on the real part of ifft2 result in inverse_spectrum
-# @wrap_errors                        # decorate compute_spectrum and inverse_spectrum
+@wrap_errors
+def compute_spectrum(image: np.ndarray) -> tuple:
+    validate_grayscale(image)
+    base = image.astype(np.float64)
+
+    fft         = np.fft.fft2(base)
+    shifted_fft = np.fft.fftshift(fft)
+
+    log_magnitude = np.log1p(np.abs(shifted_fft))
+    phase         = np.angle(shifted_fft)
+
+    return shifted_fft, log_magnitude, phase
+
+
+@wrap_errors
+def spectrum_to_display(shifted_fft: np.ndarray) -> np.ndarray:
+    log_magnitude = np.log1p(np.abs(shifted_fft))
+    return normalize_to_uint8(log_magnitude)
+
+
+@wrap_errors
+def phase_to_display(shifted_fft: np.ndarray) -> np.ndarray:
+    phase = np.angle(shifted_fft)
+    phase_shifted = phase + np.pi
+    return normalize_to_uint8(phase_shifted)
+
+
+@wrap_errors
+def inverse_spectrum(shifted_fft: np.ndarray) -> np.ndarray:
+    unshifted = np.fft.ifftshift(shifted_fft)
+    spatial   = np.fft.ifft2(unshifted)
+    real      = np.real(spatial)
+    return normalize_to_uint8(np.clip(real, 0, 255))

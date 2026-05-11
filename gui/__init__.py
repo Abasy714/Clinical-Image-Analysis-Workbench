@@ -9,3 +9,5 @@ from .histogram_panel import HistogramPanel
 from .fourier_panel import FourierPanel
 from .noise_panel import NoisePanel
 from .morphology_panel import MorphologyPanel
+from .template_panel import TemplatePanel
+from .ai_panel import AIPanel
