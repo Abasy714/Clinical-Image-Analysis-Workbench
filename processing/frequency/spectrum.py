@@ -18,31 +18,30 @@ def compute_spectrum(image: np.ndarray) -> tuple:
         return _cache['result']
     validate_grayscale(image)
     base = image.astype(np.float64)
-
+    #apply 2D FFT to convert the image from spatial domain to frequency domain
     fft         = np.fft.fft2(base)
-    shifted_fft = np.fft.fftshift(fft)
-
-    log_magnitude = np.log1p(np.abs(shifted_fft))
-    phase         = np.angle(shifted_fft)
+    shifted_fft = np.fft.fftshift(fft)  #shift the zero-frequency component to the center of the spectrum for display and for notch filter
+    log_magnitude = np.log1p(np.abs(shifted_fft))   #The log scaling compresses the huge dynamic range, 1+ is used to avoid log(0) which would be -inf
+    phase         = np.angle(shifted_fft)   #phase is the angle of the complex numbers in the shifted FFT, The magnitude and phase together fully describe the frequency content of the image.
 
     result = shifted_fft, log_magnitude, phase
     _cache = {'image_id': img_id, 'result': result}
     return result
 
-
+#The following functions take the shifted FFT and convert it to displayable images.
 @wrap_errors
 def spectrum_to_display(shifted_fft: np.ndarray) -> np.ndarray:
     log_magnitude = np.log1p(np.abs(shifted_fft))
     return normalize_to_uint8(log_magnitude)
 
-
+#
 @wrap_errors
 def phase_to_display(shifted_fft: np.ndarray) -> np.ndarray:
     phase = np.angle(shifted_fft)
     phase_shifted = phase + np.pi
     return normalize_to_uint8(phase_shifted)
 
-
+#
 @wrap_errors
 def inverse_spectrum(shifted_fft: np.ndarray) -> np.ndarray:
     unshifted = np.fft.ifftshift(shifted_fft)
