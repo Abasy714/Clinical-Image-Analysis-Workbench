@@ -37,7 +37,7 @@ def median_filter(image: np.ndarray, kernel_size: int) -> np.ndarray:
     img_h, img_w = image.shape
     pad = kernel_size // 2
 
-    padded = np.pad(image, pad, mode='edge')
+    padded = np.pad(image, pad, mode='edge') # Replicate padding to avoid black borders
 
     # Vectorized sliding window — replaces O(H*W) Python loop
     from numpy.lib.stride_tricks import as_strided
@@ -48,6 +48,6 @@ def median_filter(image: np.ndarray, kernel_size: int) -> np.ndarray:
         padded.strides[0],
         padded.strides[1],
     )
-    patches = as_strided(padded, shape=shape, strides=strides)
-    output = np.median(patches.reshape(img_h, img_w, -1), axis=2)
+    patches = as_strided(padded, shape=shape, strides=strides) 
+    output = np.median(patches.reshape(img_h, img_w, -1), axis=2) #bey compute median across el flattened kernel dimension, badal makano 4 values hayb2a 3 bas wb3deen for a kernell size of 3 hayb2a 9 values hayb2a 3*3=9, then we take the median across that dimension to get the output pixel value
     return normalize_to_uint8(output)
