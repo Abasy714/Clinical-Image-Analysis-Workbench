@@ -292,6 +292,35 @@ class SegmentationWorker(QThread):
 _log = logging.getLogger('ciaw')
 
 
+class PreviewLabel(QLabel):
+    """Small fixed preview used for before/after segmentation comparisons."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedHeight(86)
+        self.setMinimumWidth(112)
+        self.setStyleSheet(
+            f"background:{BG};border:1px solid {BORDER};border-radius:2px;"
+            f"color:{MUTED2};font-size:9px;"
+        )
+        self.setScaledContents(False)
+
+    def set_array(self, image: np.ndarray | None):
+        if image is None:
+            self.clear()
+            self.setText("No image")
+            return
+        pixmap = to_qpixmap(normalize_to_uint8(image))
+        scaled = pixmap.scaled(
+            self.width(), self.height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setText("")
+        self.setPixmap(scaled)
+
+
 class MorphologyWorker(QThread):
     result_ready = pyqtSignal(str, np.ndarray)
     error        = pyqtSignal(str)
@@ -312,6 +341,7 @@ class MorphologyWorker(QThread):
             if image is None:
                 self.error.emit("No image loaded.")
                 return
+            image = normalize_to_uint8(to_grayscale(image))
             validate_grayscale(image)
             binary = binarize(image, self._threshold)
 
@@ -367,6 +397,7 @@ class SegmentationWorker(QThread):
             if image is None:
                 self.error.emit("No image loaded.")
                 return
+            image = normalize_to_uint8(to_grayscale(image))
 
             from processing.segmentation.otsu_threshold import (
                 otsu_binarize, adaptive_threshold,
