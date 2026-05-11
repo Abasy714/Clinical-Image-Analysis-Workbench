@@ -67,17 +67,18 @@ def convolve2d(image: np.ndarray, kernel: np.ndarray, padding: str = 'zero') -> 
     if kernel.ndim != 2: #must be 2d kernel only , 3ashan convolution is defined for 2d kernels bas
         raise ValueError(f"convolve2d expects a 2D kernel, got shape {kernel.shape}")
 
-    image = image.astype(np.float64)
+    image = image.astype(np.float64) #hanestakhdem float64 for safety from overflow during convolution, we convert the image to float64 before processing
     kernel = kernel.astype(np.float64)
 
     # true convolution = correlation with flipped kernel
     kernel_flipped = np.flip(kernel) #ehna hena ben3kes el kernel ashan ne3mel convolution mesh correlation, conolution is a correlation bas flipped 180 degrees
 
     img_h, img_w = image.shape
-    k_h, k_w = kernel_flipped.shape
+    k_h, k_w = kernel_flipped.shape #we get the height and width of the kernel after flipping
 
-    pad_h = k_h // 2 #we use this equation ashan ne3mel padding ashan el kernel yb2a sabet ala el image
-    pad_w = k_w // 2
+    #ben calculate han pad b ad eh fo2 w taht w yemeen w shemal (row and columns)
+    pad_h = k_h // 2 #we use this equation ashan ne3mel padding ashan el kernel yb2a sabet ala el image lel center pixels
+    pad_w = k_w // 2 
 
     padded = _pad_image(image, pad_h, pad_w, padding) #apply padding
 
