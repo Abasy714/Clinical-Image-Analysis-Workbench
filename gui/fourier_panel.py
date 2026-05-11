@@ -20,7 +20,7 @@ from utils import (validate_grayscale, normalize_to_uint8, to_qpixmap, wrap_erro
 class SpectrumCanvas(QWidget):
     """Custom canvas showing FFT spectrum with clickable notch placement."""
 
-    clicked_at = pyqtSignal(int, int)
+    clicked_at = pyqtSignal(int, int, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,7 +55,8 @@ class SpectrumCanvas(QWidget):
         v = int(event.position().y() / ch * h_sp)
         u = max(0, min(u, w_sp - 1))
         v = max(0, min(v, h_sp - 1))
-        self.clicked_at.emit(u, v)
+        remove = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+        self.clicked_at.emit(u, v, remove)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -249,7 +250,9 @@ class FourierPanel(QWidget):
             self._spectrum_shape = log_magnitude.shape
             self._update_canvas_display()
             self._canvas.set_notches(self._notch_points)
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger('ciaw').error(f"set spectrum image failed: {e}")
             self._shifted_fft = None
             return
 
@@ -293,8 +296,10 @@ class FourierPanel(QWidget):
 
     def on_apply_clicked(self):
         if self._shifted_fft is None:
+            show_error_dialog("No Spectrum", "Load an image before applying a notch filter.")
             return
         if not self._notch_points:
+            show_error_dialog("No Notches", "Click the spectrum to place at least one notch first.")
             return
         try:
             from processing.frequency.notch_filter import create_notch_filter, apply_notch_filter
@@ -324,13 +329,32 @@ class FourierPanel(QWidget):
 
     # ------------------------------------------------------------------ private
 
-    def _on_canvas_clicked(self, u: int, v: int):
+    def _on_canvas_clicked(self, u: int, v: int, remove: bool = False):
         h, w = self._spectrum_shape
-        mirror_u = (h - u) % h
-        mirror_v = (w - v) % w
+        if remove:
+            self._remove_nearest_notch_pair(u, v)
+            return
+        mirror_u = (w - u) % w
+        mirror_v = (h - v) % h
         self._notch_points.append((u, v))
         if (mirror_u, mirror_v) != (u, v):
             self._notch_points.append((mirror_u, mirror_v))
+        self._canvas.set_notches(self._notch_points)
+        n_pairs = len(self._notch_points) // 2
+        self._notch_count_lbl.setText(f"{n_pairs} notch pair{'s' if n_pairs != 1 else ''} placed")
+
+    def _remove_nearest_notch_pair(self, u: int, v: int):
+        if not self._notch_points:
+            return
+        h, w = self._spectrum_shape
+        def dist2(point):
+            px, py = point
+            return (px - u) ** 2 + (py - v) ** 2
+
+        nearest = min(self._notch_points, key=dist2)
+        mirror_nearest = ((w - nearest[0]) % w, (h - nearest[1]) % h)
+        candidates = {nearest, mirror_nearest}
+        self._notch_points = [p for p in self._notch_points if p not in candidates]
         self._canvas.set_notches(self._notch_points)
         n_pairs = len(self._notch_points) // 2
         self._notch_count_lbl.setText(f"{n_pairs} notch pair{'s' if n_pairs != 1 else ''} placed")

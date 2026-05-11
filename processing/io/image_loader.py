@@ -15,7 +15,7 @@ from PIL import Image
 from utils.image_utils import to_grayscale, normalize_to_uint8
 from utils.error_handler import wrap_errors
 
-SUPPORTED_EXTENSIONS = ['.dcm', '.jpg', '.jpeg', '.bmp']
+SUPPORTED_EXTENSIONS = ['.dcm', '.jpg', '.jpeg', '.png', '.bmp']
 
 
 @wrap_errors

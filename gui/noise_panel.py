@@ -251,6 +251,7 @@ class NoisePanel(QWidget):
 
     def on_inject_clicked(self):
         if self._current_image is None:
+            show_error_dialog("No Image", "Load an image before injecting noise.")
             return
         try:
             validate_grayscale(self._current_image)

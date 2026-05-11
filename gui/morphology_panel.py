@@ -15,9 +15,39 @@ from PyQt6.QtCore import pyqtSignal, Qt, QThread
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
                         ACCENT, TEXT, MUTED, MUTED2, btn_style,
                         HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS)
-from utils import (validate_grayscale, binarize, normalize_to_uint8, wrap_errors, show_error_dialog,)
+from utils import (validate_grayscale, binarize, normalize_to_uint8, to_grayscale,
+                   to_qpixmap, wrap_errors, show_error_dialog,)
 
 _log = logging.getLogger('ciaw')
+
+
+class PreviewLabel(QLabel):
+    """Small fixed preview used for before/after segmentation comparisons."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedHeight(86)
+        self.setMinimumWidth(112)
+        self.setStyleSheet(
+            f"background:{BG};border:1px solid {BORDER};border-radius:2px;"
+            f"color:{MUTED2};font-size:9px;"
+        )
+        self.setScaledContents(False)
+
+    def set_array(self, image: np.ndarray | None):
+        if image is None:
+            self.clear()
+            self.setText("No image")
+            return
+        pixmap = to_qpixmap(normalize_to_uint8(image))
+        scaled = pixmap.scaled(
+            self.width(), self.height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setText("")
+        self.setPixmap(scaled)
 
 
 class MorphologyWorker(QThread):
@@ -40,6 +70,7 @@ class MorphologyWorker(QThread):
             if image is None:
                 self.error.emit("No image loaded.")
                 return
+            image = normalize_to_uint8(to_grayscale(image))
             validate_grayscale(image)
             binary = binarize(image, self._threshold)
 
@@ -95,6 +126,7 @@ class SegmentationWorker(QThread):
             if image is None:
                 self.error.emit("No image loaded.")
                 return
+            image = normalize_to_uint8(to_grayscale(image))
 
             from processing.segmentation.otsu_threshold import (
                 otsu_binarize, adaptive_threshold,
@@ -149,6 +181,7 @@ class MorphologyPanel(QWidget):
         self._source_image: np.ndarray | None = None
         self._seg_before:   np.ndarray | None = None
         self._seg_result:   np.ndarray | None = None
+        self._pending_seg_before: np.ndarray | None = None
         self._seg_showing_result = True
         self._morph_worker: MorphologyWorker | None = None
         self._seg_worker:   SegmentationWorker | None = None
@@ -199,6 +232,29 @@ class MorphologyPanel(QWidget):
         layout.addWidget(slider_row)
 
         self._threshold_slider.valueChanged.connect(self._on_threshold_changed)
+
+        self._manual_threshold_btn = QPushButton("Apply Manual Threshold")
+        self._manual_threshold_btn.setStyleSheet(APPLY_BTN_SS)
+        self._manual_threshold_btn.clicked.connect(self._apply_manual_threshold)
+        layout.addWidget(self._manual_threshold_btn)
+
+        bin_preview_lbl = QLabel("BINARIZATION PREVIEW")
+        bin_preview_lbl.setStyleSheet(FIELD_SS)
+        layout.addWidget(bin_preview_lbl)
+        bin_preview_grid = QGridLayout()
+        bin_preview_grid.setContentsMargins(0, 0, 0, 0)
+        bin_preview_grid.setSpacing(4)
+        before_bin_lbl = QLabel("Before")
+        before_bin_lbl.setStyleSheet(FIELD_SS)
+        after_bin_lbl = QLabel("After")
+        after_bin_lbl.setStyleSheet(FIELD_SS)
+        self._before_bin_preview = PreviewLabel("No image")
+        self._after_bin_preview = PreviewLabel("No image")
+        bin_preview_grid.addWidget(before_bin_lbl, 0, 0)
+        bin_preview_grid.addWidget(after_bin_lbl, 0, 1)
+        bin_preview_grid.addWidget(self._before_bin_preview, 1, 0)
+        bin_preview_grid.addWidget(self._after_bin_preview, 1, 1)
+        layout.addLayout(bin_preview_grid)
 
         layout.addWidget(_hdiv())
 
@@ -370,6 +426,24 @@ class MorphologyPanel(QWidget):
         self._color_overlay_chk.setStyleSheet(f"color:{TEXT};font-size:9px;")
         layout.addWidget(self._color_overlay_chk)
 
+        seg_preview_lbl = QLabel("SEGMENTATION PREVIEW")
+        seg_preview_lbl.setStyleSheet(FIELD_SS)
+        layout.addWidget(seg_preview_lbl)
+        seg_preview_grid = QGridLayout()
+        seg_preview_grid.setContentsMargins(0, 0, 0, 0)
+        seg_preview_grid.setSpacing(4)
+        before_seg_lbl = QLabel("Before")
+        before_seg_lbl.setStyleSheet(FIELD_SS)
+        after_seg_lbl = QLabel("After")
+        after_seg_lbl.setStyleSheet(FIELD_SS)
+        self._before_seg_preview = PreviewLabel("No image")
+        self._after_seg_preview = PreviewLabel("No image")
+        seg_preview_grid.addWidget(before_seg_lbl, 0, 0)
+        seg_preview_grid.addWidget(after_seg_lbl, 0, 1)
+        seg_preview_grid.addWidget(self._before_seg_preview, 1, 0)
+        seg_preview_grid.addWidget(self._after_seg_preview, 1, 1)
+        layout.addLayout(seg_preview_grid)
+
         self._seg_toggle_btn = QPushButton("Show Original")
         self._seg_toggle_btn.setStyleSheet(btn_style('ghost'))
         self._seg_toggle_btn.setEnabled(False)
@@ -382,6 +456,9 @@ class MorphologyPanel(QWidget):
 
     def set_image(self, image: np.ndarray):
         try:
+            if image is None:
+                return
+            image = normalize_to_uint8(to_grayscale(image))
             validate_grayscale(image)
         except ValueError:
             return
@@ -392,6 +469,46 @@ class MorphologyPanel(QWidget):
 
     def _on_threshold_changed(self, value: int):
         self._thresh_val_lbl.setText(str(value))
+        self._update_binarization_preview()
+
+    def _update_binarization_preview(self):
+        if self._source_image is None:
+            return
+        try:
+            source = normalize_to_uint8(to_grayscale(self._source_image))
+            binary = binarize(source, self._threshold_slider.value()).astype(np.uint8) * 255
+            self._before_bin_preview.set_array(source)
+            self._after_bin_preview.set_array(binary)
+        except Exception as e:
+            _log.error("binarization preview failed: %s", e)
+
+    def _apply_manual_threshold(self):
+        if self._state is None:
+            show_error_dialog("No state", "Panel not connected to pipeline state.")
+            return
+        image = self._state.get_base_image()
+        if image is None:
+            show_error_dialog("No Image", "Load an image before applying manual thresholding.")
+            return
+        try:
+            before = normalize_to_uint8(to_grayscale(image))
+            result = binarize(before, self._threshold_slider.value()).astype(np.uint8) * 255
+            self._seg_before = before
+            self._seg_result = result
+            self._seg_showing_result = True
+            self._seg_toggle_btn.setEnabled(True)
+            self._seg_toggle_btn.setText("Show Before")
+            self._before_bin_preview.set_array(before)
+            self._after_bin_preview.set_array(result)
+            self._before_seg_preview.set_array(before)
+            self._after_seg_preview.set_array(result)
+            self.segmentation_applied.emit(
+                f"Manual Threshold t={self._threshold_slider.value()}",
+                result.astype(np.uint8),
+            )
+        except Exception as e:
+            _log.error("manual threshold failed: %s", e)
+            show_error_dialog("Threshold Error", str(e))
 
     def _get_se(self) -> np.ndarray:
         size = 3
@@ -452,6 +569,12 @@ class MorphologyPanel(QWidget):
             return
         if self._seg_worker is not None and self._seg_worker.isRunning():
             return
+        base = self._state.get_base_image()
+        if base is None:
+            show_error_dialog("No Image", "Load an image before running segmentation.")
+            return
+        self._pending_seg_before = normalize_to_uint8(to_grayscale(base))
+        self._before_seg_preview.set_array(self._pending_seg_before)
         self._seg_worker = SegmentationWorker(self._state, method, params, parent=self)
         self._seg_worker.result_ready.connect(self._on_seg_done)
         self._seg_worker.threshold_found.connect(
@@ -463,22 +586,27 @@ class MorphologyPanel(QWidget):
         self._seg_worker.start()
 
     def _on_seg_done(self, op_name: str, result: np.ndarray):
-        self._seg_before = self._state.get_base_image() if self._state else None
-        self._seg_result = result
+        self._seg_before = self._pending_seg_before
+        self._seg_result = normalize_to_uint8(result)
         self._seg_showing_result = True
         self._seg_toggle_btn.setEnabled(True)
-        self._seg_toggle_btn.setText("Show Original")
-        self.segmentation_applied.emit(op_name, result)
+        self._seg_toggle_btn.setText("Show Before")
+        self._before_seg_preview.set_array(self._seg_before)
+        self._after_seg_preview.set_array(self._seg_result)
+        if op_name.lower().startswith("otsu") or "threshold" in op_name.lower():
+            self._before_bin_preview.set_array(self._seg_before)
+            self._after_bin_preview.set_array(self._seg_result)
+        self.segmentation_applied.emit(op_name, self._seg_result)
 
     def _on_seg_toggle_clicked(self):
         if self._seg_before is None or self._seg_result is None:
             return
         self._seg_showing_result = not self._seg_showing_result
         if self._seg_showing_result:
-            self._seg_toggle_btn.setText("Show Original")
+            self._seg_toggle_btn.setText("Show Before")
             self.display_override.emit(self._seg_result)
         else:
-            self._seg_toggle_btn.setText("Show Segmented")
+            self._seg_toggle_btn.setText("Show After")
             self.display_override.emit(self._seg_before)
 
     def _run_otsu(self):

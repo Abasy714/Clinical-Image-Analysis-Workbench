@@ -9,15 +9,25 @@ Returns results compatible with the workbench pipeline signal (str, np.ndarray).
 import numpy as np
 
 
+def _as_gray_u8(image: np.ndarray) -> np.ndarray:
+    from utils import to_grayscale, normalize_to_uint8
+
+    if image is None:
+        raise ValueError("No image provided.")
+    gray = to_grayscale(image)
+    if gray.ndim != 2:
+        raise ValueError(f"Expected a grayscale-compatible image, got shape {image.shape}")
+    return normalize_to_uint8(gray)
+
+
 def otsu_threshold(image: np.ndarray) -> int:
 
-    from utils import validate_grayscale
     from processing.histogram.histogram_utils import compute_histogram
 
-    validate_grayscale(image)
+    image_u8 = _as_gray_u8(image)
 
-    hist  = compute_histogram(image).astype(np.float64)
-    total = float(image.size)
+    hist  = compute_histogram(image_u8).astype(np.float64)
+    total = float(image_u8.size)
     eps   = 1e-10
 
     cumsum   = np.cumsum(hist)
@@ -41,10 +51,16 @@ def otsu_threshold(image: np.ndarray) -> int:
 
 def otsu_binarize(image: np.ndarray) -> tuple:
 
-    from utils import validate_grayscale, normalize_to_uint8
+    image_u8 = _as_gray_u8(image)
 
-    validate_grayscale(image)
-    image_u8 = normalize_to_uint8(image)
+    try:
+        import cv2
+        t, binary = cv2.threshold(
+            image_u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        )
+        return binary.astype(np.uint8), int(round(float(t)))
+    except Exception:
+        pass
 
     t      = otsu_threshold(image_u8)
     binary = (image_u8 > t).astype(np.uint8) * 255
@@ -57,10 +73,8 @@ def adaptive_threshold(image: np.ndarray,
                         C: float = 2.0) -> np.ndarray:
 
     from numpy.lib.stride_tricks import as_strided
-    from utils import validate_grayscale, normalize_to_uint8
 
-    validate_grayscale(image)
-    image_u8 = normalize_to_uint8(image)
+    image_u8 = _as_gray_u8(image)
 
     if block_size % 2 == 0:
         block_size += 1
@@ -88,11 +102,9 @@ def adaptive_threshold(image: np.ndarray,
 def multi_level_otsu(image: np.ndarray,
                       n_classes: int = 3) -> tuple:
    
-    from utils import validate_grayscale, normalize_to_uint8
     from processing.histogram.histogram_utils import compute_histogram
 
-    validate_grayscale(image)
-    image_u8 = normalize_to_uint8(image)
+    image_u8 = _as_gray_u8(image)
 
     if n_classes < 2 or n_classes > 4:
         raise ValueError(f"n_classes must be 2, 3, or 4. Got {n_classes}")
@@ -176,10 +188,7 @@ def apply_colormap_overlay(image: np.ndarray,
                              label_map: np.ndarray,
                              alpha: float = 0.45) -> np.ndarray:
 
-    from utils import validate_grayscale, normalize_to_uint8
-
-    validate_grayscale(image)
-    image_u8 = normalize_to_uint8(image)
+    image_u8 = _as_gray_u8(image)
 
     rgb = np.stack([image_u8, image_u8, image_u8], axis=2).astype(np.float64)
 

@@ -7,13 +7,16 @@ Manages the tabbed interface, global pipeline state, and communication between p
 import numpy as np
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                               QSplitter, QMenuBar, QStatusBar, QLabel,
-                              QFileDialog, QApplication, QTabWidget, QFrame)
+                              QFileDialog, QApplication, QTabWidget, QFrame,
+                              QScrollArea, QPushButton)
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QFont
 
 from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, ACCENT2, TEXT, MUTED, MUTED2, apply_styles)
-from utils import (PipelineState, wrap_errors, show_error_dialog, setup_logger,)
+                        ACCENT, ACCENT2, TEXT, MUTED, MUTED2, btn_style,
+                        apply_styles)
+from utils import (PipelineState, wrap_errors, show_error_dialog, setup_logger,
+                   normalize_to_uint8, to_grayscale,)
 
 APP_TITLE = "Clinical Image Analysis Workbench"
 APP_VERSION = "1.0.0"
@@ -29,6 +32,13 @@ class MainWindow(QMainWindow):
 
         self.pipeline = PipelineState()
         self.logger = setup_logger()
+        self.original_image: np.ndarray | None = None
+        self.current_spatial_image: np.ndarray | None = None
+        self.current_frequency_image: np.ndarray | None = None
+        self.current_binary_image: np.ndarray | None = None
+        self.current_segmentation_image: np.ndarray | None = None
+        self.template_image: np.ndarray | None = None
+        self.display_mode: str = "spatial"
 
         self._build_menu()
         self._build_central()
@@ -105,7 +115,8 @@ class MainWindow(QMainWindow):
 
         # left panel: metadata + pipeline
         left = QWidget()
-        left.setFixedWidth(210)
+        left.setMinimumWidth(210)
+        left.setMaximumWidth(260)
         left.setStyleSheet("""
             QWidget {
                 background-color: #181917;
@@ -131,7 +142,8 @@ class MainWindow(QMainWindow):
 
         # right panel: tabs
         right_tabs = QTabWidget()
-        right_tabs.setFixedWidth(270)
+        right_tabs.setMinimumWidth(320)
+        right_tabs.setMaximumWidth(390)
         right_tabs.setStyleSheet("""
             QWidget {
                 background-color: #181917;
@@ -155,7 +167,7 @@ class MainWindow(QMainWindow):
                 font-size: 9px;
                 font-weight: bold;
                 letter-spacing: 2px;
-                min-width: 54px;
+                min-width: 40px;
             }
             QTabBar::tab:selected {
                 color: #c8f135;
@@ -184,13 +196,13 @@ class MainWindow(QMainWindow):
         self.template_panel = TemplatePanel()
         self.ai_panel = AIPanel()
 
-        right_tabs.addTab(self._filter_panel, "FILTER")
-        right_tabs.addTab(self._hist_panel, "HIST")
-        right_tabs.addTab(self._fourier_panel, "FREQ")
-        right_tabs.addTab(self._morph_panel, "MORPH")
-        right_tabs.addTab(self._noise_panel, "NOISE")
-        right_tabs.addTab(self.template_panel, "TMPL")
-        right_tabs.addTab(self.ai_panel, "AI")
+        right_tabs.addTab(self._wrap_tool_panel(self._filter_panel), "FILTER")
+        right_tabs.addTab(self._wrap_tool_panel(self._hist_panel), "HIST")
+        right_tabs.addTab(self._wrap_tool_panel(self._fourier_panel), "FREQ")
+        right_tabs.addTab(self._wrap_tool_panel(self._morph_panel), "MORPH")
+        right_tabs.addTab(self._wrap_tool_panel(self._noise_panel), "NOISE")
+        right_tabs.addTab(self._wrap_tool_panel(self.template_panel), "TMPL")
+        right_tabs.addTab(self._wrap_tool_panel(self.ai_panel), "AI")
         splitter.addWidget(right_tabs)
 
         splitter.setStretchFactor(0, 0)
@@ -199,6 +211,20 @@ class MainWindow(QMainWindow):
 
         self._right_tabs = right_tabs
         vl.addWidget(splitter, stretch=1)
+
+    def _wrap_tool_panel(self, panel: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidget(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            f"QScrollArea{{background:{PANEL};border:none;}}"
+            f"QScrollBar:vertical{{background:{BG};width:7px;border:none;}}"
+            f"QScrollBar::handle:vertical{{background:{BORDER2};border-radius:3px;min-height:20px;}}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        )
+        return scroll
 
     def _make_title_bar(self) -> QWidget:
         bar = QWidget()
@@ -220,6 +246,20 @@ class MainWindow(QMainWindow):
         hl.addWidget(title_lbl)
 
         hl.addStretch()
+
+        self._spatial_display_btn = QPushButton("Spatial")
+        self._spatial_display_btn.setCheckable(True)
+        self._spatial_display_btn.setChecked(True)
+        self._spatial_display_btn.setFixedHeight(24)
+        self._spatial_display_btn.setStyleSheet(btn_style())
+        hl.addWidget(self._spatial_display_btn)
+
+        self._frequency_display_btn = QPushButton("Frequency")
+        self._frequency_display_btn.setCheckable(True)
+        self._frequency_display_btn.setChecked(False)
+        self._frequency_display_btn.setFixedHeight(24)
+        self._frequency_display_btn.setStyleSheet(btn_style('ghost'))
+        hl.addWidget(self._frequency_display_btn)
 
         self._session_lbl = QLabel("SESSION  READY")
         self._session_lbl.setStyleSheet(
@@ -284,6 +324,9 @@ class MainWindow(QMainWindow):
         self._filter_panel.apply_btn.clicked.connect(self._on_filter_apply)
         self._filter_panel.kernel_btn.clicked.connect(self._on_kernel_modal)
         self._filter_panel.filter_applied.connect(self.on_operation_applied)
+        self._filter_panel.operation_failed.connect(
+            lambda _msg: self._image_viewer.show_processing_overlay(False)
+        )
 
         # histogram panel
         self._hist_panel.apply_btn.clicked.connect(self._on_hist_apply)
@@ -296,7 +339,7 @@ class MainWindow(QMainWindow):
         # morphology panel
         self._morph_panel.morphology_applied.connect(self.on_operation_applied)
         self._morph_panel.segmentation_applied.connect(self._on_segmentation_applied)
-        self._morph_panel.display_override.connect(self._image_viewer.set_image)
+        self._morph_panel.display_override.connect(self._on_display_override)
 
         # noise panel
         self._noise_panel.inject_btn.clicked.connect(self._noise_panel.on_inject_clicked)
@@ -304,6 +347,7 @@ class MainWindow(QMainWindow):
 
         # template panel (Phase 2)
         self.template_panel.template_match_found.connect(self.on_operation_applied)
+        self.template_panel.template_changed.connect(self._on_template_changed)
 
         # AI panel (Phase 2 bonus)
         self.ai_panel.suggestion_applied.connect(self.on_operation_applied)
@@ -327,6 +371,9 @@ class MainWindow(QMainWindow):
         # tab change — compute spectrum only when Freq tab is selected
         self._right_tabs.currentChanged.connect(self._on_tab_changed)
 
+        self._spatial_display_btn.clicked.connect(lambda: self._set_display_mode("spatial"))
+        self._frequency_display_btn.clicked.connect(lambda: self._set_display_mode("frequency"))
+
     # ------------------------------------------------------------------ actions
 
     @wrap_errors
@@ -336,37 +383,36 @@ class MainWindow(QMainWindow):
             images_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images")
             filepath, _ = QFileDialog.getOpenFileName(
                 self, "Open Image", images_dir,
-                "Medical Images (*.dcm *.jpg *.jpeg *.bmp);;All Files (*)"
+                "Medical Images (*.dcm *.jpg *.jpeg *.png *.bmp);;All Files (*)"
             )
         if not filepath:
             return
         from processing.io import load_image
-        image, metadata = load_image(filepath)
+        loaded = load_image(filepath)
+        if loaded is None:
+            show_error_dialog("Load failed", f"Could not load: {filepath}")
+            return
+        image, metadata = loaded
         if image is None:
             show_error_dialog("Load failed", f"Could not load: {filepath}")
             return
+        image = self._as_spatial_image(image)
+        self.original_image = image.copy()
+        self.current_spatial_image = image.copy()
+        self.current_binary_image = None
+        self.current_segmentation_image = None
+        self.template_image = None
+        self.display_mode = "spatial"
         self.pipeline.set_original(image)
-        self._image_viewer.set_image(image, fit_to_window=True)
+        self._compute_frequency_image(image)
+        self._display_current_image(fit_to_window=True)
         if hasattr(self._image_viewer, 'set_before_image'):
             self._image_viewer.set_before_image(image)
         self._metadata_panel.update_metadata(metadata)
         self._pipeline_panel.refresh_stack()
         self._pipeline_panel.update_checkpoints()
-        try:
-            self._fourier_panel.set_image(image)
-        except Exception:
-            pass
-        self._morph_panel.set_image(image)
-        self._noise_panel.set_image(image)
-        self._filter_panel.set_current_image(image)
-        try:
-            self.template_panel.set_current_image(image)
-        except AttributeError:
-            pass
-        try:
-            self.ai_panel.set_current_image(image)
-        except AttributeError:
-            pass
+        self._refresh_processing_sources()
+        self._update_display_mode_buttons()
         h, w = image.shape[:2]
         self._sb_dim.setText(f"{w}×{h}")
         self._sb_op.setText("OP: load")
@@ -375,6 +421,9 @@ class MainWindow(QMainWindow):
 
     @wrap_errors
     def save_image(self):
+        if not self.pipeline.has_image():
+            show_error_dialog("No Image", "Load an image before saving.")
+            return
         filepath, _ = QFileDialog.getSaveFileName(
             self, "Save Image", "",
             "JPEG (*.jpg *.jpeg);;BMP (*.bmp);;PNG (*.png);;All Files (*)"
@@ -382,30 +431,30 @@ class MainWindow(QMainWindow):
         if not filepath:
             return
         from processing.io import save_image
-        save_image(self.pipeline.current(), filepath)
+        current = self.current_spatial_image
+        if current is None:
+            show_error_dialog("No Image", "There is no image to save.")
+            return
+        save_image(current, filepath)
         self.logger.info("Saved image: %s", filepath)
 
     def on_operation_applied(self, op_name: str, result: np.ndarray):
+        if result is None or not isinstance(result, np.ndarray):
+            show_error_dialog("Operation Error", f"{op_name} did not return an image.")
+            self._image_viewer.show_processing_overlay(False)
+            return
+        result = normalize_to_uint8(result)
         self.pipeline.push(op_name, result)
-        self._image_viewer.set_image(result)
+        self.current_spatial_image = result.copy()
+        if self._is_binary_image(result):
+            self.current_binary_image = result.copy()
+        if any(token in op_name.lower() for token in ("otsu", "threshold", "segment", "multi-otsu")):
+            self.current_segmentation_image = result.copy()
+        self._compute_frequency_image(result)
+        self._display_current_image()
         self._pipeline_panel.refresh_stack()
         self._pipeline_panel.update_checkpoints()
-        base = self.pipeline.get_base_image()
-        self._morph_panel.set_image(base)
-        self._noise_panel.set_image(base)
-        try:
-            self._fourier_panel.set_image(result)
-        except Exception:
-            pass
-        self._filter_panel.set_current_image(base)
-        try:
-            self.template_panel.set_current_image(result)
-        except AttributeError:
-            pass
-        try:
-            self.ai_panel.set_current_image(result)
-        except AttributeError:
-            pass
+        self._refresh_processing_sources()
 
         stack_depth = len(self.pipeline.get_stack_names())
         self._sb_op.setText(f"OP: {op_name[:18]}")
@@ -418,9 +467,12 @@ class MainWindow(QMainWindow):
         self.logger.info("Operation applied: %s", op_name)
 
     def _on_segmentation_applied(self, op_name: str, result: np.ndarray):
-        current = self.pipeline.current()
+        current = self.current_spatial_image
         if current is not None and hasattr(self._image_viewer, 'set_before_image'):
             self._image_viewer.set_before_image(current)
+        self.current_segmentation_image = normalize_to_uint8(result)
+        if self._is_binary_image(result):
+            self.current_binary_image = normalize_to_uint8(result)
         self.on_operation_applied(op_name, result)
 
     def update_status_bar(self, **kwargs):
@@ -437,21 +489,123 @@ class MainWindow(QMainWindow):
             if key in mapping:
                 mapping[key].setText(str(val))
 
+    # ------------------------------------------------------------------ image state
+
+    def _as_spatial_image(self, image: np.ndarray | None) -> np.ndarray | None:
+        if image is None:
+            return None
+        return normalize_to_uint8(to_grayscale(image))
+
+    def _is_binary_image(self, image: np.ndarray | None) -> bool:
+        if image is None:
+            return False
+        gray = self._as_spatial_image(image)
+        values = np.unique(gray)
+        return values.size <= 2 and set(int(v) for v in values).issubset({0, 255})
+
+    def _compute_frequency_image(self, image: np.ndarray | None = None) -> np.ndarray | None:
+        source = self._as_spatial_image(image if image is not None else self.current_spatial_image)
+        if source is None:
+            self.current_frequency_image = None
+            return None
+        try:
+            from processing.frequency.spectrum import compute_spectrum, spectrum_to_display
+            shifted_fft, _log_magnitude, _phase = compute_spectrum(source)
+            self.current_frequency_image = spectrum_to_display(shifted_fft)
+            self._fourier_panel.set_image(source)
+            return self.current_frequency_image
+        except Exception as e:
+            self.logger.error("Frequency image update failed: %s", e)
+            self.current_frequency_image = None
+            return None
+
+    def _refresh_processing_sources(self):
+        display_source = self.current_spatial_image
+        if display_source is None:
+            return
+        operation_source = self.pipeline.get_base_image()
+        if operation_source is None:
+            operation_source = display_source
+        self._morph_panel.set_image(operation_source)
+        self._noise_panel.set_image(operation_source)
+        self._filter_panel.set_current_image(operation_source)
+        try:
+            self.template_panel.set_current_image(display_source)
+        except AttributeError:
+            pass
+        try:
+            self.ai_panel.set_current_image(display_source)
+        except AttributeError:
+            pass
+
+    def _display_current_image(self, fit_to_window: bool = False):
+        if self.display_mode == "frequency":
+            image = self.current_frequency_image
+            if image is None:
+                image = self._compute_frequency_image()
+            if image is None:
+                show_error_dialog("No Frequency Image", "Load an image before switching to frequency display.")
+                self.display_mode = "spatial"
+                self._update_display_mode_buttons()
+                image = self.current_spatial_image
+        else:
+            image = self.current_spatial_image
+
+        if image is not None:
+            self._image_viewer.set_image(image, fit_to_window=fit_to_window)
+
+    def _set_display_mode(self, mode: str):
+        if mode not in ("spatial", "frequency"):
+            return
+        if self.current_spatial_image is None:
+            show_error_dialog("No Image", "Load an image before changing display mode.")
+            self._update_display_mode_buttons()
+            return
+        self.display_mode = mode
+        if mode == "frequency":
+            self._compute_frequency_image()
+        self._update_display_mode_buttons()
+        self._display_current_image(fit_to_window=True)
+        self._sb_op.setText(f"OP: display {mode}")
+        self.logger.info("Display mode: %s", mode)
+
+    def _update_display_mode_buttons(self):
+        is_spatial = self.display_mode == "spatial"
+        self._spatial_display_btn.setChecked(is_spatial)
+        self._frequency_display_btn.setChecked(not is_spatial)
+        self._spatial_display_btn.setStyleSheet(btn_style() if is_spatial else btn_style('ghost'))
+        self._frequency_display_btn.setStyleSheet(btn_style() if not is_spatial else btn_style('ghost'))
+
+    def _on_display_override(self, image: np.ndarray):
+        self._image_viewer.set_image(image)
+
+    def _on_template_changed(self, image: np.ndarray):
+        self.template_image = self._as_spatial_image(image)
+
     # ------------------------------------------------------------------ panel dispatch
 
     def _on_filter_apply(self):
         image = self.pipeline.get_base_image()
         if image is None:
+            show_error_dialog("No Image", "Load an image before applying a filter.")
             return
         self._image_viewer.show_processing_overlay(True)
         self._filter_panel.set_current_image(image)
         self._filter_panel.on_apply_clicked(image)
 
     def _on_kernel_modal(self):
-        self._filter_panel.open_kernel_modal(self.pipeline.get_base_image())
+        image = self.pipeline.get_base_image()
+        if image is None:
+            show_error_dialog("No Image", "Load an image before editing a kernel.")
+            return
+        self._filter_panel.open_kernel_modal(image)
 
     def _on_hist_apply(self):
-        self._hist_panel.on_apply_clicked(self.pipeline.get_base_image())
+        image = self.pipeline.get_base_image()
+        if image is None:
+            show_error_dialog("No Image", "Load an image before applying histogram equalization.")
+            return
+        self._hist_panel.on_apply_clicked(image)
 
     def _on_pipeline_mode_changed(self, mode: str):
         """Switch pipeline mode (cumulative/independent) and update UI."""
@@ -471,18 +625,7 @@ class MainWindow(QMainWindow):
         # Update panels' source image to the new base
         base = self.pipeline.get_base_image()
         if base is not None:
-            try:
-                self._morph_panel.set_image(base)
-            except Exception:
-                pass
-            try:
-                self._noise_panel.set_image(base)
-            except Exception:
-                pass
-            try:
-                self._filter_panel.set_current_image(base)
-            except Exception:
-                pass
+            self._refresh_processing_sources()
         self.logger.info(f"Pipeline mode: {mode}")
 
     def _on_roi_selected(self, roi):
@@ -490,7 +633,7 @@ class MainWindow(QMainWindow):
             if roi is not None and roi.width() > 0 and roi.height() > 0:
                 self._sb_roi.setText(f"ROI: {roi.width()}×{roi.height()}")
 
-            image = self.pipeline.current()
+            image = self.current_spatial_image
             if image is None:
                 return
 
@@ -522,15 +665,29 @@ class MainWindow(QMainWindow):
             logging.getLogger('ciaw').error(f"_on_roi_selected error: {e}")
 
     def _do_undo(self):
+        if not self.pipeline.has_image():
+            show_error_dialog("No Image", "Load an image before using undo.")
+            return
         image = self.pipeline.undo()
-        self._image_viewer.set_image(image)
+        self.current_spatial_image = normalize_to_uint8(image) if image is not None else None
+        self._compute_frequency_image(self.current_spatial_image)
+        self._display_current_image()
+        self._refresh_processing_sources()
         self._pipeline_panel.refresh_stack()
         stack_depth = len(self.pipeline.get_stack_names())
         self._sb_pipe.setText(f"STACK: {stack_depth}")
 
     def _do_reset(self):
+        if not self.pipeline.has_image():
+            show_error_dialog("No Image", "Load an image before resetting.")
+            return
         image = self.pipeline.reset()
-        self._image_viewer.set_image(image, fit_to_window=True)
+        self.current_spatial_image = normalize_to_uint8(image) if image is not None else None
+        self.current_binary_image = None
+        self.current_segmentation_image = None
+        self._compute_frequency_image(self.current_spatial_image)
+        self._display_current_image(fit_to_window=True)
+        self._refresh_processing_sources()
         if hasattr(self._image_viewer, 'set_before_image'):
             self._image_viewer.set_before_image(image)
         self._pipeline_panel.refresh_stack()
@@ -538,24 +695,29 @@ class MainWindow(QMainWindow):
         self._sb_pipe.setText("STACK: 0")
 
     def _do_checkpoint_save(self, slot: str):
+        if not self.pipeline.has_image():
+            show_error_dialog("No Image", "Load an image before saving a checkpoint.")
+            return
         self.pipeline.save_checkpoint(slot)
         self._pipeline_panel.update_checkpoints()
 
     def _do_checkpoint_restore(self, slot: str):
         image = self.pipeline.restore_checkpoint(slot)
         if image is not None:
-            self._image_viewer.set_image(image)
+            self.current_spatial_image = normalize_to_uint8(image)
+            self._compute_frequency_image(self.current_spatial_image)
+            self._display_current_image()
+            self._refresh_processing_sources()
             self._pipeline_panel.refresh_stack()
             self._pipeline_panel.update_checkpoints()
 
     def _on_tab_changed(self, index: int):
         tab_text = self._right_tabs.tabText(index).strip().upper()
         if tab_text == "FREQ":
-            image = self.pipeline.current()
+            image = self.current_spatial_image
             if image is not None:
                 try:
-                    from processing.frequency.spectrum import compute_spectrum  # noqa: F401
-                    self._fourier_panel.set_image(image)
+                    self._compute_frequency_image(image)
                 except ImportError:
                     # Phase 2 not implemented yet — no dialog
                     pass

@@ -1,4 +1,7 @@
 import numpy as np
+import logging
+
+_log = logging.getLogger('ciaw')
 
 
 def _pad_binary(binary: np.ndarray, pad_h: int, pad_w: int) -> np.ndarray:
@@ -12,8 +15,7 @@ def erode(binary: np.ndarray, se: np.ndarray) -> np.ndarray:
     binary = binary.astype(bool)
     se = se.astype(bool)
 
-    print("erode input unique:", np.unique(binary))
-    print("erode input sum:", binary.sum())
+    _log.debug("erode input sum: %s", int(binary.sum()))
 
     se_h, se_w = se.shape
     pad_h, pad_w = se_h // 2, se_w // 2
@@ -27,11 +29,9 @@ def erode(binary: np.ndarray, se: np.ndarray) -> np.ndarray:
                 shift = padded[dr:dr + rows, dc:dc + cols]
                 shifts.append(shift)
 
-    print("number of shifts:", len(shifts))
     stacked = np.stack(shifts, axis=0)
-    print("stacked shape:", stacked.shape)
     result = np.all(stacked, axis=0)
-    print("erode output sum:", result.sum())
+    _log.debug("erode output sum: %s", int(result.sum()))
     return result
 
 

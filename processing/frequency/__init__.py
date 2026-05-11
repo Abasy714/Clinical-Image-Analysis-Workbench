@@ -5,4 +5,11 @@ from .spectrum import (
     inverse_spectrum,
 )
 from .notch_filter import create_notch_filter, apply_notch_filter
-from .template_matching import fourier_cross_correlate, find_best_match
+from .template_matching import (
+    fourier_cross_correlate,
+    find_best_match,
+    normalized_cross_correlation,
+    find_template_matches,
+    draw_matches,
+    match_template,
+)

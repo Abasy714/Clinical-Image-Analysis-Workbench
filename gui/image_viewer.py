@@ -62,6 +62,7 @@ class ImageViewer(QWidget):
         self._interp_mode: str = 'nearest'
         self._roi: QRect | None = None
         self._origin: QPoint = QPoint()
+        self._dragging_roi: bool = False
 
         self.setStyleSheet(f"background:{BG};")
         layout = QVBoxLayout(self)
@@ -319,25 +320,29 @@ class ImageViewer(QWidget):
             QTimer.singleShot(0, self.fit_to_window)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton and self._image is not None:
             self._origin = event.position().toPoint()
+            self._dragging_roi = True
             self._rubber_band.setGeometry(QRect(self._origin, QSize()))
             self._rubber_band.show()
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
-        if not self._origin.isNull():
+        if self._dragging_roi:
             self._rubber_band.setGeometry(QRect(self._origin, pos).normalized())
         ix, iy = self._viewport_to_image(pos)
         self._coord_label.setText(f"x:{ix}  y:{iy}")
         self.coords_changed.emit(ix, iy)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and not self._origin.isNull():
+        if event.button() == Qt.MouseButton.LeftButton and self._dragging_roi:
             end = event.position().toPoint()
             vp_rect = QRect(self._origin, end).normalized()
             self._rubber_band.hide()
             self._origin = QPoint()
+            self._dragging_roi = False
+            if vp_rect.width() < 2 or vp_rect.height() < 2:
+                return
             self._roi = self._viewport_rect_to_image_rect(vp_rect)
             try:
                 self.roi_selected.emit(self._roi)

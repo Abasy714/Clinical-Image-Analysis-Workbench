@@ -1,21 +1,28 @@
-# STATUS: STUB — Phase 2 bonus
 """
-AI/CV panel for ROI classification using MobileNetV2.
-Displays classification result, confidence, and Grad-CAM overlay.
-Also provides an enhancement suggestion engine based on image statistics.
+AI/CV panel.
+
+The classifier controls are present but the trained model is not bundled with
+the project. The enhancement suggestion controls are implemented locally using
+the existing processing functions.
 """
 
+import logging
 import numpy as np
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
-                              QFrame, QProgressBar)
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QPushButton, QLabel, QFrame, QProgressBar,
+)
 from PyQt6.QtCore import pyqtSignal
 
 try:
-    from gui.styles import (HEADER_SS, FIELD_SS, APPLY_BTN_SS, ACCENT, BORDER)
+    from gui.styles import HEADER_SS, APPLY_BTN_SS, ACCENT, BORDER
 except ImportError:
-    HEADER_SS = FIELD_SS = APPLY_BTN_SS = ""
+    HEADER_SS = APPLY_BTN_SS = ""
     ACCENT = "#c8f135"
     BORDER = "#2c2e2a"
+
+from utils import show_error_dialog, normalize_to_uint8
+
+_log = logging.getLogger('ciaw')
 
 
 class AIPanel(QWidget):
@@ -28,6 +35,7 @@ class AIPanel(QWidget):
         super().__init__(parent)
         self._current_image = None
         self._current_roi = None
+        self._suggested_action = None
         self._build_ui()
 
     def _build_ui(self):
@@ -48,7 +56,7 @@ class AIPanel(QWidget):
         self._result_label.setStyleSheet("color: #6b6f65; font-size: 9px;")
         layout.addWidget(self._result_label)
 
-        self._confidence_label = QLabel("Confidence: —")
+        self._confidence_label = QLabel("Confidence: -")
         self._confidence_label.setStyleSheet(
             f"color: {ACCENT}; font-size: 13px; font-weight: bold;"
         )
@@ -86,7 +94,7 @@ class AIPanel(QWidget):
         self._analyze_btn.clicked.connect(self._on_analyze_clicked)
         layout.addWidget(self._analyze_btn)
 
-        self._suggestion_label = QLabel("—")
+        self._suggestion_label = QLabel("-")
         self._suggestion_label.setWordWrap(True)
         self._suggestion_label.setStyleSheet("color: #6b6f65; font-size: 9px;")
         layout.addWidget(self._suggestion_label)
@@ -106,35 +114,69 @@ class AIPanel(QWidget):
         self._current_roi = roi
 
     def _on_classify_clicked(self):
-        import logging
-        logging.getLogger('ciaw').error("AI classifier not implemented yet — Phase 2 bonus")
+        _log.error("AI classifier requested, but no trained model is bundled.")
+        show_error_dialog(
+            "Classifier Unavailable",
+            "The classifier model is not included in this project yet."
+        )
 
     def _on_gradcam_clicked(self):
-        import logging
-        logging.getLogger('ciaw').error("Grad-CAM not implemented yet — Phase 2 bonus")
+        _log.error("Grad-CAM requested, but no trained classifier is bundled.")
+        show_error_dialog(
+            "Grad-CAM Unavailable",
+            "Grad-CAM requires a trained classifier model, which is not included yet."
+        )
 
     def _on_analyze_clicked(self):
         if self._current_image is None:
+            show_error_dialog("No Image", "Load an image before analyzing enhancement suggestions.")
             return
         try:
             img = self._current_image.astype(float)
-            mean_val = img.mean()
-            std_val = img.std()
-            suggestions = []
+            mean_val = float(img.mean())
+            std_val = float(img.std())
+
             if std_val < 30:
-                suggestions.append("Low contrast detected → Apply Local EQ 8x8")
-            if std_val > 80:
-                suggestions.append("High noise detected → Apply Adaptive Median first")
-            if mean_val < 60:
-                suggestions.append("Dark image → Apply Histogram EQ")
-            if not suggestions:
-                suggestions.append("Image quality OK → try Gaussian sigma=1.0 for smoothing")
-            self._suggestion_label.setText("\n".join(suggestions))
+                suggestion = "Low contrast detected -> Apply Local EQ 8x8"
+                self._suggested_action = "local_eq"
+            elif std_val > 80:
+                suggestion = "High variation detected -> Apply Median 3x3 first"
+                self._suggested_action = "median"
+            elif mean_val < 60:
+                suggestion = "Dark image -> Apply Local EQ 8x8"
+                self._suggested_action = "local_eq"
+            else:
+                suggestion = "Image quality OK -> try Gaussian sigma=1.0 for smoothing"
+                self._suggested_action = "gaussian"
+
+            self._suggestion_label.setText(suggestion)
             self._apply_suggestion_btn.setEnabled(True)
         except Exception as e:
-            import logging
-            logging.getLogger('ciaw').error(f"analyze failed: {e}")
+            _log.error("analyze failed: %s", e)
+            show_error_dialog("Analysis Error", str(e))
 
     def _on_apply_suggestion_clicked(self):
-        import logging
-        logging.getLogger('ciaw').error("apply suggestion not implemented yet")
+        if self._current_image is None:
+            show_error_dialog("No Image", "Load an image before applying a suggestion.")
+            return
+        if self._suggested_action is None:
+            show_error_dialog("No Suggestion", "Analyze the image before applying a suggestion.")
+            return
+        try:
+            if self._suggested_action == "local_eq":
+                from processing.histogram import local_histogram_equalization
+                result = local_histogram_equalization(self._current_image, 8)
+                op_name = "Suggested Local EQ 8x8"
+            elif self._suggested_action == "median":
+                from processing.spatial import median_filter
+                result = median_filter(self._current_image, 3)
+                op_name = "Suggested Median 3x3"
+            else:
+                from processing.spatial import gaussian_filter
+                result = gaussian_filter(self._current_image, 3, 1.0)
+                op_name = "Suggested Gaussian 3x3"
+
+            self.suggestion_applied.emit(op_name, normalize_to_uint8(result))
+        except Exception as e:
+            _log.error("apply suggestion failed: %s", e)
+            show_error_dialog("Suggestion Error", str(e))

@@ -81,6 +81,8 @@ class HistWorker(QThread):
     def run(self):
         try:
             result = self._fn()
+            if result is None:
+                raise RuntimeError(f"{self._op_name} returned no result.")
             self.finished.emit(self._op_name, result)
         except Exception as e:
             import traceback
@@ -170,6 +172,8 @@ class HistogramPanel(QWidget):
 
     def on_apply_clicked(self, image: np.ndarray):
         try:
+            if image is None:
+                raise ValueError("Load an image before applying histogram equalization.")
             validate_grayscale(image)
         except Exception as e:
             show_error_dialog("Invalid Image", str(e))

@@ -32,6 +32,8 @@ class FilterWorker(QThread):
     def run(self):
         try:
             result = self._fn()
+            if result is None:
+                raise RuntimeError(f"{self._op_name} returned no result.")
             self.finished.emit(self._op_name, result)
         except Exception as e:
             import traceback
@@ -51,6 +53,8 @@ class GeometricWorker(QThread):
     def run(self):
         try:
             result = self._fn()
+            if result is None:
+                raise RuntimeError(f"{self._op_name} returned no result.")
             self.finished.emit(self._op_name, result)
         except Exception as e:
             import traceback
@@ -59,6 +63,7 @@ class GeometricWorker(QThread):
 
 class FilterPanel(QWidget):
     filter_applied = pyqtSignal(str, np.ndarray)
+    operation_failed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -546,12 +551,15 @@ class FilterPanel(QWidget):
 
     def on_apply_clicked(self, image: np.ndarray):
         try:
+            if image is None:
+                raise ValueError("Load an image before applying a filter.")
             validate_grayscale(image)
             ft = self._filter_combo.currentText()
             sz = self._get_current_kernel_size()
             sigma = self._sigma_spin.value()
         except Exception as e:
             show_error_dialog("Filter Error", str(e))
+            self.operation_failed.emit(str(e))
             return
 
         _image = image.copy()
@@ -630,9 +638,11 @@ class FilterPanel(QWidget):
         import logging
         logging.getLogger('ciaw').error(f"Filter worker error: {error_msg}")
         show_error_dialog("Filter Error", error_msg)
+        self.operation_failed.emit(error_msg)
 
     def _apply_rotation(self):
         if self._current_image is None:
+            show_error_dialog("No Image", "Load an image before applying rotation.")
             return
         _image = self._current_image.copy()
         _angle = self._angle_spin.value()
@@ -646,6 +656,7 @@ class FilterPanel(QWidget):
 
     def _apply_shearing(self):
         if self._current_image is None:
+            show_error_dialog("No Image", "Load an image before applying shearing.")
             return
         _image = self._current_image.copy()
         _sx = self._shear_x_spin.value()
@@ -666,9 +677,13 @@ class FilterPanel(QWidget):
         import logging
         logging.getLogger('ciaw').error(f"Geometric worker error: {error_msg}")
         show_error_dialog("Geometric Transform Error", error_msg)
+        self.operation_failed.emit(error_msg)
 
     @wrap_errors
     def open_kernel_modal(self, image: np.ndarray):
+        if image is None:
+            show_error_dialog("No Image", "Load an image before editing a kernel.")
+            return
         validate_grayscale(image)
         dlg = KernelEditorDialog(sigma=self._sigma_spin.value(), parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
