@@ -1,7 +1,7 @@
 import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSpinBox, QTabWidget, QSizePolicy,
+    QSpinBox, QDoubleSpinBox, QTabWidget, QSizePolicy, QButtonGroup, QGridLayout,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -9,7 +9,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from gui.theme import get as _get_theme
-from gui.styles import btn_style, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.styles import btn_style, operation_btn_style, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
 from gui.workers import PipelineWorker
 
 
@@ -54,15 +54,47 @@ def _canvas_phase(image):
     return phase_to_display(shifted_fft)
 
 
-def _notch_filter_fn(image, notch_centers, radius):
+def _freq_filter_fn(image, filter_type, cutoff=30.0, order=2,
+                    low_cutoff=10.0, high_cutoff=50.0):
+    from processing.frequency.spectrum import compute_spectrum, inverse_spectrum
+    from processing.frequency.filters import (
+        create_low_pass_filter, create_high_pass_filter,
+        create_band_pass_filter, create_band_reject_filter,
+        apply_frequency_filter,
+    )
+    if image.ndim == 3:
+        gray = (0.299 * image[:, :, 0] + 0.587 * image[:, :, 1]
+                + 0.114 * image[:, :, 2]).astype(np.uint8)
+    else:
+        gray = image
+    shape = gray.shape[:2]
+    shifted_fft, _, _ = compute_spectrum(gray)
+    center = (low_cutoff + high_cutoff) / 2.0
+    bandwidth = max(high_cutoff - low_cutoff, 1.0)
+    # filter_type format: '{shape}_{type}', e.g. 'ideal_lowpass', 'butterworth_bandreject'
+    shape_kind, ftype = filter_type.split('_', 1)
+    if ftype == 'lowpass':
+        mask = create_low_pass_filter(shape, cutoff, kind=shape_kind, order=order)
+    elif ftype == 'highpass':
+        mask = create_high_pass_filter(shape, cutoff, kind=shape_kind, order=order)
+    elif ftype == 'bandpass':
+        mask = create_band_pass_filter(shape, center, bandwidth, kind=shape_kind, order=order)
+    elif ftype == 'bandreject':
+        mask = create_band_reject_filter(shape, center, bandwidth, kind=shape_kind, order=order)
+    else:
+        raise ValueError(f"Unknown filter type: {filter_type!r}")
+    filtered = apply_frequency_filter(shifted_fft, mask)
+    return inverse_spectrum(filtered)
+
+
+def _notch_filter_fn(image, notch_centers, radius, filter_shape='ideal', order=2):
     from processing.frequency.spectrum import compute_spectrum, inverse_spectrum
     from processing.frequency.notch_filter import create_notch_filter, apply_notch_filter
     gray = _to_gray(image)
     shape = gray.shape[:2]
     shifted_fft, _, _ = compute_spectrum(gray)
-    combined = np.ones(shape, dtype=np.float64)
-    for (row, col) in notch_centers:
-        combined *= create_notch_filter(shape, u=col, v=row, radius=radius)
+    combined = create_notch_filter(shape, notch_centers, radius=radius,
+                                   filter_shape=filter_shape, order=order)
     filtered = apply_notch_filter(shifted_fft, combined)
     return inverse_spectrum(filtered)
 
@@ -125,6 +157,7 @@ class FourierPanel(QWidget):
         tabs.setDocumentMode(True)
         tabs.addTab(self._build_spectrum_tab(), "SPECTRUM")
         tabs.addTab(self._build_notch_tab(), "NOTCH")
+        tabs.addTab(self._build_freq_filters_tab(), "FREQ FILTERS")
         layout.addWidget(tabs)
 
     def _lbl(self, text: str) -> QLabel:
@@ -216,15 +249,46 @@ class FourierPanel(QWidget):
         radius_row.addWidget(self._radius_spin)
         lyt.addLayout(radius_row)
 
+        lyt.addWidget(self._header("NOTCH SHAPE"))
+        self._notch_shape_group = QButtonGroup(self)
+        self._notch_shape_group.setExclusive(True)
+        notch_shape_row = QHBoxLayout()
+        notch_shape_row.setSpacing(4)
+        for i, (label, key) in enumerate([
+            ("IDEAL", "ideal"), ("GAUSSIAN", "gaussian"), ("BUTTERWORTH", "butterworth"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("notch_shape_key", key)
+            btn.setStyleSheet(btn_style('default'))
+            if i == 0:
+                btn.setChecked(True)
+            self._notch_shape_group.addButton(btn, i)
+            notch_shape_row.addWidget(btn)
+        self._notch_shape_group.idClicked.connect(self._on_notch_shape_changed)
+        lyt.addLayout(notch_shape_row)
+
+        self._notch_order_w = QWidget()
+        notch_order_lyt = QHBoxLayout(self._notch_order_w)
+        notch_order_lyt.setContentsMargins(0, 0, 0, 0)
+        notch_order_lyt.addWidget(self._lbl("ORDER"))
+        self._notch_order_spin = QSpinBox()
+        self._notch_order_spin.setStyleSheet(SPINBOX_SS)
+        self._notch_order_spin.setRange(1, 10)
+        self._notch_order_spin.setValue(2)
+        notch_order_lyt.addWidget(self._notch_order_spin)
+        self._notch_order_w.setVisible(False)
+        lyt.addWidget(self._notch_order_w)
+
         clear_btn = QPushButton("CLEAR POINTS")
         clear_btn.setStyleSheet(btn_style('default'))
         clear_btn.clicked.connect(self._clear_notch_points)
         lyt.addWidget(clear_btn)
 
-        apply_btn = QPushButton("APPLY NOTCH FILTER")
-        apply_btn.setStyleSheet(APPLY_BTN_SS)
-        apply_btn.clicked.connect(self._apply_notch)
-        lyt.addWidget(apply_btn)
+        self._notch_btn = QPushButton("APPLY NOTCH FILTER")
+        self._notch_btn.setStyleSheet(operation_btn_style())
+        self._notch_btn.clicked.connect(self._apply_notch)
+        lyt.addWidget(self._notch_btn)
 
         return w
 
@@ -331,21 +395,171 @@ class FourierPanel(QWidget):
     # Apply operations
     # ------------------------------------------------------------------
 
-    def _start_worker(self, fn, op_name: str, **kwargs):
+    def _start_worker(self, fn, op_name: str, btn=None, btn_label=None, **kwargs):
         if self._state is None:
             return
         if self._worker and self._worker.isRunning():
             return
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("⟳ Processing...")
         self._worker = PipelineWorker(fn, op_name, self._state, **kwargs)
         self._worker.finished.connect(self.fourier_applied)
         self._worker.error.connect(self.error_occurred)
+        if btn is not None:
+            orig = btn_label or op_name
+            self._worker.finished.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
+            self._worker.error.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
         self._worker.start()
+
+    # ---- FREQ FILTERS tab ----
+
+    def _build_freq_filters_tab(self) -> QWidget:
+        w = QWidget()
+        lyt = QVBoxLayout(w)
+        lyt.setContentsMargins(8, 8, 8, 8)
+        lyt.setSpacing(6)
+
+        lyt.addWidget(self._header("FILTER TYPE"))
+        self._ff_type_group = QButtonGroup(self)
+        self._ff_type_group.setExclusive(True)
+        type_grid = QGridLayout()
+        type_grid.setSpacing(4)
+        for i, (label, key) in enumerate([
+            ("LOW PASS",    "lowpass"),
+            ("HIGH PASS",   "highpass"),
+            ("BAND PASS",   "bandpass"),
+            ("BAND REJECT", "bandreject"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("ff_key", key)
+            btn.setStyleSheet(btn_style('default'))
+            if i == 0:
+                btn.setChecked(True)
+            self._ff_type_group.addButton(btn, i)
+            type_grid.addWidget(btn, i // 2, i % 2)
+        self._ff_type_group.idClicked.connect(self._on_ff_type_changed)
+        lyt.addLayout(type_grid)
+
+        lyt.addWidget(self._header("SHAPE"))
+        self._ff_shape_group = QButtonGroup(self)
+        self._ff_shape_group.setExclusive(True)
+        shape_row = QHBoxLayout()
+        shape_row.setSpacing(4)
+        for i, (label, key) in enumerate([
+            ("IDEAL", "ideal"), ("GAUSSIAN", "gaussian"), ("BUTTERWORTH", "butterworth"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("ff_shape_key", key)
+            btn.setStyleSheet(btn_style('default'))
+            if i == 0:
+                btn.setChecked(True)
+            self._ff_shape_group.addButton(btn, i)
+            shape_row.addWidget(btn)
+        self._ff_shape_group.idClicked.connect(self._on_ff_shape_changed)
+        lyt.addLayout(shape_row)
+
+        self._ff_order_w = QWidget()
+        ol = QHBoxLayout(self._ff_order_w)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.addWidget(self._lbl("ORDER"))
+        self._ff_order_spin = QSpinBox()
+        self._ff_order_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_order_spin.setRange(1, 10)
+        self._ff_order_spin.setValue(2)
+        ol.addWidget(self._ff_order_spin)
+        self._ff_order_w.setVisible(False)
+        lyt.addWidget(self._ff_order_w)
+
+        self._ff_cutoff_w = QWidget()
+        cl = QHBoxLayout(self._ff_cutoff_w)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.addWidget(self._lbl("CUTOFF"))
+        self._ff_cutoff_spin = QDoubleSpinBox()
+        self._ff_cutoff_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_cutoff_spin.setRange(1.0, 200.0)
+        self._ff_cutoff_spin.setValue(30.0)
+        cl.addWidget(self._ff_cutoff_spin)
+        lyt.addWidget(self._ff_cutoff_w)
+
+        self._ff_low_w = QWidget()
+        ll = QHBoxLayout(self._ff_low_w)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(self._lbl("LOW CUTOFF"))
+        self._ff_low_spin = QDoubleSpinBox()
+        self._ff_low_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_low_spin.setRange(1.0, 200.0)
+        self._ff_low_spin.setValue(10.0)
+        ll.addWidget(self._ff_low_spin)
+        self._ff_low_w.setVisible(False)
+        lyt.addWidget(self._ff_low_w)
+
+        self._ff_high_w = QWidget()
+        hl = QHBoxLayout(self._ff_high_w)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(self._lbl("HIGH CUTOFF"))
+        self._ff_high_spin = QDoubleSpinBox()
+        self._ff_high_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_high_spin.setRange(1.0, 200.0)
+        self._ff_high_spin.setValue(50.0)
+        hl.addWidget(self._ff_high_spin)
+        self._ff_high_w.setVisible(False)
+        lyt.addWidget(self._ff_high_w)
+
+        self._filter_btn = QPushButton("APPLY FREQUENCY FILTER")
+        self._filter_btn.setStyleSheet(operation_btn_style())
+        self._filter_btn.clicked.connect(self._apply_freq_filter)
+        lyt.addWidget(self._filter_btn)
+
+        lyt.addStretch()
+        return w
+
+    def _on_ff_type_changed(self, _idx: int):
+        btn = self._ff_type_group.checkedButton()
+        key = btn.property("ff_key") if btn else "lowpass"
+        is_band = key in ("bandpass", "bandreject")
+        self._ff_cutoff_w.setVisible(not is_band)
+        self._ff_low_w.setVisible(is_band)
+        self._ff_high_w.setVisible(is_band)
+
+    def _on_ff_shape_changed(self, _idx: int):
+        btn = self._ff_shape_group.checkedButton()
+        key = btn.property("ff_shape_key") if btn else "ideal"
+        self._ff_order_w.setVisible(key == "butterworth")
+
+    def _on_notch_shape_changed(self, _idx: int):
+        btn = self._notch_shape_group.checkedButton()
+        key = btn.property("notch_shape_key") if btn else "ideal"
+        self._notch_order_w.setVisible(key == "butterworth")
+
+    def _apply_freq_filter(self):
+        type_btn  = self._ff_type_group.checkedButton()
+        shape_btn = self._ff_shape_group.checkedButton()
+        ftype  = type_btn.property("ff_key")       if type_btn  else "lowpass"
+        fshape = shape_btn.property("ff_shape_key") if shape_btn else "ideal"
+        filter_type = f"{fshape}_{ftype}"
+        self._start_worker(
+            _freq_filter_fn, f"Freq: {filter_type}",
+            btn=self._filter_btn, btn_label="APPLY FREQUENCY FILTER",
+            filter_type=filter_type,
+            cutoff=self._ff_cutoff_spin.value(),
+            order=self._ff_order_spin.value(),
+            low_cutoff=self._ff_low_spin.value(),
+            high_cutoff=self._ff_high_spin.value(),
+        )
 
     def _apply_notch(self):
         if not self._notch_centers:
             return
+        shape_btn = self._notch_shape_group.checkedButton()
+        filter_shape = shape_btn.property("notch_shape_key") if shape_btn else "ideal"
         self._start_worker(
             _notch_filter_fn, "Notch Filter",
+            btn=self._notch_btn, btn_label="APPLY NOTCH FILTER",
             notch_centers=list(self._notch_centers),
             radius=self._radius_spin.value(),
+            filter_shape=filter_shape,
+            order=self._notch_order_spin.value(),
         )

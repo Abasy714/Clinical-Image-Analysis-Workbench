@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 
 from gui.theme import get as _get_theme
-from gui.styles import btn_style, COMBO_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.styles import btn_style, operation_btn_style, COMBO_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
 from gui.workers import PipelineWorker
 
 
@@ -60,10 +60,43 @@ class TemplatePanel(QWidget):
         self._state = None
         self._worker: PipelineWorker | None = None
         self._template: np.ndarray | None = None
+        self._roi: tuple | None = None
         self._build_ui()
 
     def set_state(self, state):
         self._state = state
+
+    def set_roi(self, x: int, y: int, w: int, h: int):
+        self._roi = (x, y, w, h)
+        self._roi_lbl.setText(f"ROI: ({x},{y}) {w}×{h}")
+        self._roi_btn.setEnabled(self._state is not None)
+        self._load_template_from_roi()
+
+    def _load_template_from_roi(self):
+        if self._state is None or self._roi is None:
+            return
+        image = self._state.current()
+        if image is None:
+            return
+        x, y, w, h = self._roi
+        x = max(0, min(x, image.shape[1] - 1))
+        y = max(0, min(y, image.shape[0] - 1))
+        w = max(1, min(w, image.shape[1] - x))
+        h = max(1, min(h, image.shape[0] - y))
+        roi = image[y:y+h, x:x+w]
+        if roi.ndim == 3:
+            roi_gray = (0.299 * roi[:, :, 0] + 0.587 * roi[:, :, 1]
+                        + 0.114 * roi[:, :, 2]).astype(np.uint8)
+        else:
+            roi_gray = roi.copy()
+        self._template = roi_gray
+        self._show_template_thumbnail(roi_gray)
+        self._template_info.setText(f"ROI template: {w}×{h}")
+        self._find_btn.setEnabled(True)
+
+    def _show_template_thumbnail(self, arr: np.ndarray):
+        pix = _gray_to_qpixmap(arr)
+        self._thumb_lbl.setPixmap(pix)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -82,6 +115,19 @@ class TemplatePanel(QWidget):
         load_btn.clicked.connect(self._load_template)
         layout.addWidget(load_btn)
 
+        self._roi_lbl = QLabel("No ROI selected")
+        self._roi_lbl.setStyleSheet(
+            f"color: {p['MUTED']}; font-family: 'JetBrains Mono', Consolas, monospace; "
+            f"font-size: 9px;"
+        )
+        layout.addWidget(self._roi_lbl)
+
+        self._roi_btn = QPushButton("USE ROI AS TEMPLATE")
+        self._roi_btn.setStyleSheet(btn_style('default'))
+        self._roi_btn.setEnabled(False)
+        self._roi_btn.clicked.connect(self._load_template_from_roi)
+        layout.addWidget(self._roi_btn)
+
         self._thumb_lbl = QLabel()
         self._thumb_lbl.setFixedSize(120, 120)
         self._thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -90,10 +136,10 @@ class TemplatePanel(QWidget):
         )
         layout.addWidget(self._thumb_lbl)
 
-        self._info_lbl = QLabel("No template loaded")
-        self._info_lbl.setStyleSheet(FIELD_SS)
-        self._info_lbl.setWordWrap(True)
-        layout.addWidget(self._info_lbl)
+        self._template_info = QLabel("No template loaded")
+        self._template_info.setStyleSheet(FIELD_SS)
+        self._template_info.setWordWrap(True)
+        layout.addWidget(self._template_info)
 
         layout.addWidget(self._header("METHOD"))
         self._method_combo = QComboBox()
@@ -102,10 +148,11 @@ class TemplatePanel(QWidget):
         self._method_combo.addItem("Normalized CC")
         layout.addWidget(self._method_combo)
 
-        find_btn = QPushButton("FIND MATCH")
-        find_btn.setStyleSheet(APPLY_BTN_SS)
-        find_btn.clicked.connect(self._find_match)
-        layout.addWidget(find_btn)
+        self._find_btn = QPushButton("FIND MATCH")
+        self._find_btn.setStyleSheet(operation_btn_style())
+        self._find_btn.setEnabled(False)
+        self._find_btn.clicked.connect(self._find_match)
+        layout.addWidget(self._find_btn)
 
         layout.addWidget(self._header("RESULT"))
 
@@ -158,14 +205,15 @@ class TemplatePanel(QWidget):
             return
         arr = _qimage_to_gray(path)
         if arr is None:
-            self._info_lbl.setText("Failed to load image.")
+            self._template_info.setText("Failed to load image.")
             return
         self._template = arr
         pix = _gray_to_qpixmap(arr)
         self._thumb_lbl.setPixmap(pix)
         import os
         fname = os.path.basename(path)
-        self._info_lbl.setText(f"{fname}\n{arr.shape[1]}×{arr.shape[0]} px")
+        self._template_info.setText(f"{fname}\n{arr.shape[1]}×{arr.shape[0]} px")
+        self._find_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Find match
@@ -175,7 +223,7 @@ class TemplatePanel(QWidget):
         if self._state is None:
             return
         if self._template is None:
-            self._info_lbl.setText("Load a template first.")
+            self._template_info.setText("Load a template first.")
             return
         if self._worker and self._worker.isRunning():
             return
@@ -183,10 +231,14 @@ class TemplatePanel(QWidget):
         method = self._method_combo.currentText()
         fn = _fft_match_fn if method == "FFT Cross-Correlation" else _ncc_match_fn
 
+        self._find_btn.setEnabled(False)
+        self._find_btn.setText("⟳ Processing...")
         self._worker = PipelineWorker(fn, "Template Match", self._state,
                                       template=self._template.copy())
         self._worker.finished.connect(self._on_match_done)
         self._worker.error.connect(self.error_occurred)
+        self._worker.finished.connect(lambda *_: (self._find_btn.setEnabled(True), self._find_btn.setText("FIND MATCH")))
+        self._worker.error.connect(lambda *_: (self._find_btn.setEnabled(True), self._find_btn.setText("FIND MATCH")))
         self._worker.start()
 
     def _on_match_done(self, _op_name: str, corr_map: np.ndarray):

@@ -1,9 +1,11 @@
 import numpy as np
+from collections import Counter
 from utils.image_utils import normalize_to_uint8
 
 
 def sliding_window_classify(image: np.ndarray, window_size: int = 128,
-                             stride: int = 32) -> np.ndarray:
+                             stride: int = 32):
+    """Return (overlay_uint8, stats_dict)."""
     if image.ndim == 3:
         gray = (0.299 * image[:, :, 0] + 0.587 * image[:, :, 1]
                 + 0.114 * image[:, :, 2]).astype(np.uint8)
@@ -24,6 +26,8 @@ def sliding_window_classify(image: np.ndarray, window_size: int = 128,
     n_rows = len(row_positions)
     n_cols = len(col_positions)
     conf_map = np.zeros((n_rows, n_cols), dtype=np.float64)
+    label_counts: Counter = Counter()
+    conf_list: list = []
 
     rgb_input = np.stack([gray, gray, gray], axis=-1)
 
@@ -31,7 +35,21 @@ def sliding_window_classify(image: np.ndarray, window_size: int = 128,
         for ci, c in enumerate(col_positions):
             crop = rgb_input[r:r + window_size, c:c + window_size]
             result = predict(crop)
-            conf_map[ri, ci] = result.get('confidence', 0.0)
+            conf = result.get('confidence', 0.0)
+            label = result.get('label', '')
+            conf_map[ri, ci] = conf
+            conf_list.append(conf)
+            label_counts[label] += 1
+
+    predicted_class = label_counts.most_common(1)[0][0] if label_counts else ''
+    conf_arr = np.array(conf_list, dtype=np.float64)
+    stats = {
+        'mean_confidence': float(conf_arr.mean()) if len(conf_arr) else 0.0,
+        'max_confidence':  float(conf_arr.max())  if len(conf_arr) else 0.0,
+        'hot_regions':     int((conf_arr > 0.7).sum()),
+        'total_windows':   int(len(conf_arr)),
+        'predicted_class': predicted_class,
+    }
 
     full_map = np.zeros((H, W), dtype=np.float64)
     scale_r = H / n_rows
@@ -57,4 +75,4 @@ def sliding_window_classify(image: np.ndarray, window_size: int = 128,
 
     overlay = np.clip(0.5 * rgb_input.astype(np.float64)
                       + 0.5 * colored.astype(np.float64), 0, 255).astype(np.uint8)
-    return normalize_to_uint8(overlay)
+    return normalize_to_uint8(overlay), stats

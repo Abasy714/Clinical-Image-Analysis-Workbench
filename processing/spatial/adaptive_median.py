@@ -51,6 +51,13 @@ def adaptive_median_filter(
     if max_window is not None:
         s_max = max_window
 
+    if image is None:
+        raise ValueError('adaptive_median_filter: image is None')
+    if not isinstance(image, np.ndarray):
+        raise ValueError(f'adaptive_median_filter: expected ndarray, got {type(image).__name__}')
+    if image.ndim == 3:
+        from utils.image_utils import to_grayscale
+        image = normalize_to_uint8(to_grayscale(image))
     validate_grayscale(image)
 
     if s_min < 3 or s_min % 2 == 0:

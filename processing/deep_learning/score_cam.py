@@ -17,18 +17,17 @@ def overlay_heatmap(original_rgb: np.ndarray, heatmap: np.ndarray,
 
 def compute_scorecam(image: np.ndarray, roi: tuple | None = None,
                      alpha: float = 0.4) -> np.ndarray:
-    import tensorflow as tf
     from PIL import Image as PILImage
     from utils.image_utils import normalize_to_uint8
-    from processing.deep_learning.predictor import load_model
+    from processing.deep_learning.grad_cam import _load_grad_model
 
-    meta  = _load_metadata()
-    sz    = int(meta.get('input_size', [224, 224])[0])
-    model = load_model()
+    meta = _load_metadata()
+    _sz  = meta.get('input_size', [224, 224])
+    sz   = int(_sz[0] if isinstance(_sz, (list, tuple)) else _sz)
 
     if roi is not None:
         x, y, w, h = roi
-        target = image[y:y+h, x:x+w]
+        target = image[y:y + h, x:x + w]
     else:
         target = image
 
@@ -40,45 +39,33 @@ def compute_scorecam(image: np.ndarray, roi: tuple | None = None,
     norm  = orig.astype(np.float32) / 255.0
     batch = np.expand_dims(norm, 0)
 
-    last_conv = meta.get('last_conv_layer', None)
-    if last_conv is None:
-        heatmap = np.ones((sz, sz), dtype=np.float32)
-        return normalize_to_uint8(overlay_heatmap(orig, heatmap, alpha))
+    grad_model = _load_grad_model()
 
-    try:
-        conv_model = tf.keras.Model(
-            inputs=model.inputs,
-            outputs=[model.get_layer(last_conv).output, model.output],
-        )
-    except Exception:
-        heatmap = np.ones((sz, sz), dtype=np.float32)
-        return normalize_to_uint8(overlay_heatmap(orig, heatmap, alpha))
+    # Initial forward pass — get conv activations and class prediction
+    activations, preds = grad_model(batch, training=False)
+    activations = activations.numpy()   # (1, h, w, C)
+    class_idx   = int(np.argmax(preds[0]))
+    n_channels  = activations.shape[-1]
 
-    activations, preds = conv_model.predict(batch, verbose=0)
-    class_idx  = int(np.argmax(preds[0]))
-    n_channels = activations.shape[-1]
-
+    # Score each channel: mask input by normalised channel map, record class score
     scores = np.zeros(n_channels, dtype=np.float32)
     for ch in range(n_channels):
         act_ch = activations[0, :, :, ch]
         mn, mx = act_ch.min(), act_ch.max()
         norm_ch = (act_ch - mn) / (mx - mn + 1e-8)
-        norm_rs = np.array(
-            PILImage.fromarray((norm_ch * 255).astype(np.uint8)).resize(
-                (sz, sz), PILImage.BILINEAR)
+        mask = np.array(
+            PILImage.fromarray((norm_ch * 255).astype(np.uint8))
+            .resize((sz, sz), PILImage.BILINEAR)
         ).astype(np.float32) / 255.0
-        masked = batch * norm_rs[np.newaxis, :, :, np.newaxis]
-        scores[ch] = model.predict(masked, verbose=0)[0][class_idx]
+        masked = batch * mask[np.newaxis, :, :, np.newaxis]
+        _, score_out = grad_model(masked, training=False)
+        scores[ch] = float(score_out[0, class_idx])
 
     weights = np.maximum(scores, 0)
-    heatmap = np.zeros((activations.shape[1], activations.shape[2]), dtype=np.float32)
-    for ch in range(n_channels):
-        heatmap += weights[ch] * activations[0, :, :, ch]
-
+    heatmap = (activations[0] * weights[np.newaxis, np.newaxis, :]).sum(axis=-1)
     heatmap = np.maximum(heatmap, 0)
-    mx = heatmap.max()
-    if mx > 0:
-        heatmap /= mx
+    hmax    = heatmap.max()
+    if hmax > 0:
+        heatmap /= hmax
 
-    result = overlay_heatmap(orig, heatmap, alpha)
-    return normalize_to_uint8(result)
+    return normalize_to_uint8(overlay_heatmap(orig, heatmap, alpha))

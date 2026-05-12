@@ -1,13 +1,15 @@
 import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QDoubleSpinBox, QSpinBox, QTabWidget,
+    QComboBox, QDoubleSpinBox, QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from gui.theme import get as _get_theme
-from gui.styles import COMBO_SS, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.styles import operation_btn_style, COMBO_SS, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
 from gui.workers import PipelineWorker
+
+DASH = "—"
 
 
 class NoisePanel(QWidget):
@@ -21,6 +23,9 @@ class NoisePanel(QWidget):
         self._roi: tuple | None = None  # (x, y, w, h)
         self._build_ui()
 
+    def set_reference_image(self, image: np.ndarray):
+        pass  # removed with MSE/PSNR functionality
+
     def set_state(self, state):
         self._state = state
 
@@ -33,9 +38,14 @@ class NoisePanel(QWidget):
         self._roi = None
         self._roi_lbl.setText("ROI: none selected")
         for lbl in (self._stat_mean, self._stat_std, self._stat_var,
-                    self._stat_snr, self._stat_ent, self._stat_mse,
-                    self._stat_psnr, self._stat_cnr):
-            lbl.setText("---")
+                    self._stat_snr, self._stat_ent):
+            lbl.setText(DASH)
+
+    def refresh_roi(self):
+        if self._roi is None:
+            self.clear_roi()
+            return
+        self._compute_stats()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -48,9 +58,8 @@ class NoisePanel(QWidget):
 
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
-        tabs.addTab(self._build_inject_tab(),  "INJECT")
-        tabs.addTab(self._build_roi_tab(),     "ROI STATS")
-        tabs.addTab(self._build_adaptive_tab(), "ADAPTIVE MEDIAN")
+        tabs.addTab(self._build_inject_tab(), "INJECT")
+        tabs.addTab(self._build_roi_tab(),    "ROI STATS")
         layout.addWidget(tabs)
 
     def _lbl(self, text: str) -> QLabel:
@@ -70,7 +79,7 @@ class NoisePanel(QWidget):
         row_lyt.setContentsMargins(0, 2, 0, 2)
         name_lbl = QLabel(label)
         name_lbl.setStyleSheet(FIELD_SS)
-        val_lbl = QLabel("---")
+        val_lbl = QLabel(DASH)
         val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         val_lbl.setStyleSheet(
             f"color: {p['TEXT']}; font-family: 'JetBrains Mono', Consolas, monospace; "
@@ -198,7 +207,7 @@ class NoisePanel(QWidget):
         lyt.addWidget(self._sp_w)
 
         apply_btn = QPushButton("INJECT NOISE")
-        apply_btn.setStyleSheet(APPLY_BTN_SS)
+        apply_btn.setStyleSheet(operation_btn_style())
         apply_btn.clicked.connect(self._apply_noise)
         lyt.addWidget(apply_btn)
         lyt.addStretch()
@@ -230,43 +239,6 @@ class NoisePanel(QWidget):
         row, self._stat_ent = self._stat_row("Entropy")
         lyt.addWidget(row)
 
-        lyt.addWidget(self._header("MSE / PSNR"))
-        row, self._stat_mse  = self._stat_row("MSE")
-        lyt.addWidget(row)
-        row, self._stat_psnr = self._stat_row("PSNR")
-        lyt.addWidget(row)
-
-        lyt.addWidget(self._header("CNR"))
-        row, self._stat_cnr = self._stat_row("CNR")
-        lyt.addWidget(row)
-
-        lyt.addStretch()
-        return w
-
-    # ---- ADAPTIVE MEDIAN tab ----
-
-    def _build_adaptive_tab(self) -> QWidget:
-        w = QWidget()
-        lyt = QVBoxLayout(w)
-        lyt.setContentsMargins(8, 8, 8, 8)
-        lyt.setSpacing(6)
-
-        lyt.addWidget(self._header("ADAPTIVE MEDIAN FILTER"))
-
-        win_row = QHBoxLayout()
-        win_row.addWidget(self._lbl("MAX WINDOW"))
-        self._max_window_spin = QSpinBox()
-        self._max_window_spin.setStyleSheet(SPINBOX_SS)
-        self._max_window_spin.setRange(3, 21)
-        self._max_window_spin.setSingleStep(2)
-        self._max_window_spin.setValue(7)
-        win_row.addWidget(self._max_window_spin)
-        lyt.addLayout(win_row)
-
-        apply_btn = QPushButton("APPLY ADAPTIVE MEDIAN")
-        apply_btn.setStyleSheet(APPLY_BTN_SS)
-        apply_btn.clicked.connect(self._apply_adaptive_median)
-        lyt.addWidget(apply_btn)
         lyt.addStretch()
         return w
 
@@ -357,11 +329,3 @@ class NoisePanel(QWidget):
         self._stat_var.setText(f"{var:.2f}")
         self._stat_snr.setText(f"{snr:.2f}" if np.isfinite(snr) else "∞")
         self._stat_ent.setText(f"{entropy:.3f} bits")
-        self._stat_mse.setText("---")
-        self._stat_psnr.setText("---")
-        self._stat_cnr.setText("---")
-
-    def _apply_adaptive_median(self):
-        from processing.spatial.adaptive_median import adaptive_median_filter
-        self._start_worker(adaptive_median_filter, "Adaptive Median",
-                           max_window=self._max_window_spin.value())

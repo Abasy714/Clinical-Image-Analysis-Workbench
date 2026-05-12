@@ -10,6 +10,11 @@ from .advanced import (
     black_top_hat,
     apply_advanced_op,
 )
+from .pipeline_ops import (
+    apply_morphology,
+    binarize_for_morphology,
+    morphology_threshold,
+)
 
 __all__ = [
     "get_square_se", "get_cross_se", "get_disk_se", "get_se",
@@ -17,4 +22,5 @@ __all__ = [
     "opening", "closing",
     "extract_boundary", "extract_boundary_vectorized",
     "morphological_gradient", "white_top_hat", "black_top_hat", "apply_advanced_op",
+    "apply_morphology", "binarize_for_morphology", "morphology_threshold",
 ]

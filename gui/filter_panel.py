@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 
 from gui.theme import get as _get_theme
-from gui.styles import btn_style, COMBO_SS, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.styles import btn_style, operation_btn_style, COMBO_SS, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
 from gui.workers import PipelineWorker
 
 
@@ -39,40 +39,6 @@ def _gaussian_preview_kernel(size, sigma):
     xx, yy = np.meshgrid(ax, ax)
     k = np.exp(-(xx ** 2 + yy ** 2) / (2 * sigma ** 2))
     return k / k.sum()
-
-
-def _freq_filter_fn(image, filter_type, cutoff=30.0, order=2,
-                    low_cutoff=10.0, high_cutoff=50.0):
-    from processing.frequency.spectrum import compute_spectrum, inverse_spectrum
-    from processing.frequency.filters import (
-        create_low_pass_filter, create_high_pass_filter,
-        create_band_pass_filter, create_band_reject_filter,
-        apply_frequency_filter,
-    )
-    if image.ndim == 3:
-        gray = (0.299 * image[:, :, 0] + 0.587 * image[:, :, 1]
-                + 0.114 * image[:, :, 2]).astype(np.uint8)
-    else:
-        gray = image
-    shape = gray.shape[:2]
-    shifted_fft, _, _ = compute_spectrum(gray)
-    center = (low_cutoff + high_cutoff) / 2.0
-    bandwidth = max(high_cutoff - low_cutoff, 1.0)
-    _masks = {
-        'Ideal Lowpass':        lambda: create_low_pass_filter(shape, cutoff, kind='ideal'),
-        'Ideal Highpass':       lambda: create_high_pass_filter(shape, cutoff, kind='ideal'),
-        'Butterworth Lowpass':  lambda: create_low_pass_filter(shape, cutoff, kind='butterworth', order=order),
-        'Butterworth Highpass': lambda: create_high_pass_filter(shape, cutoff, kind='butterworth', order=order),
-        'Gaussian Lowpass':     lambda: create_low_pass_filter(shape, cutoff, kind='gaussian'),
-        'Gaussian Highpass':    lambda: create_high_pass_filter(shape, cutoff, kind='gaussian'),
-        'Bandpass':             lambda: create_band_pass_filter(shape, center, bandwidth),
-        'Bandreject':           lambda: create_band_reject_filter(shape, center, bandwidth),
-    }
-    mask_fn = _masks.get(filter_type)
-    if mask_fn is None:
-        raise ValueError(f"Unknown filter_type: {filter_type!r}")
-    filtered = apply_frequency_filter(shifted_fft, mask_fn())
-    return inverse_spectrum(filtered)
 
 
 _KERNEL_PRESETS = {
@@ -186,7 +152,6 @@ class KernelEditorDialog(QDialog):
 class FilterPanel(QWidget):
     filter_applied = pyqtSignal(str, np.ndarray)
     error_occurred = pyqtSignal(str)
-    interp_changed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -211,7 +176,6 @@ class FilterPanel(QWidget):
         tabs.setDocumentMode(True)
         tabs.addTab(self._build_spatial_tab(), "SPATIAL")
         tabs.addTab(self._build_geometric_tab(), "GEOMETRIC")
-        tabs.addTab(self._build_interp_tab(), "INTERP")
         layout.addWidget(tabs)
 
     def _lbl(self, text: str) -> QLabel:
@@ -343,93 +307,26 @@ class FilterPanel(QWidget):
         )
         lyt.addWidget(self._kernel_table)
 
+        self._kernel_note_lbl = QLabel("Mag = √(H² + V²)")
+        self._kernel_note_lbl.setStyleSheet(FIELD_SS)
+        self._kernel_note_lbl.setVisible(False)
+        lyt.addWidget(self._kernel_note_lbl)
+
         self._custom_btn = QPushButton("EDIT CUSTOM KERNEL")
         self._custom_btn.setStyleSheet(btn_style('ghost'))
         self._custom_btn.clicked.connect(self._open_kernel_editor)
         lyt.addWidget(self._custom_btn)
 
-        apply_spatial_btn = QPushButton("APPLY SPATIAL FILTER")
-        apply_spatial_btn.setStyleSheet(APPLY_BTN_SS)
-        apply_spatial_btn.clicked.connect(self._apply_spatial)
-        lyt.addWidget(apply_spatial_btn)
-
-        # Divider
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet(f"color: {p['BORDER']}; background: {p['BORDER']};")
-        divider.setFixedHeight(1)
-        lyt.addWidget(divider)
-
-        # ===== Section 2: FREQUENCY DOMAIN FILTERS =====
-        lyt.addWidget(self._header("FREQUENCY DOMAIN FILTERS"))
-
-        self._freq_combo = QComboBox()
-        self._freq_combo.setStyleSheet(COMBO_SS)
-        for name in [
-            "Ideal Lowpass", "Ideal Highpass",
-            "Butterworth Lowpass", "Butterworth Highpass",
-            "Gaussian Lowpass", "Gaussian Highpass",
-            "Bandpass", "Bandreject",
-        ]:
-            self._freq_combo.addItem(name)
-        self._freq_combo.currentIndexChanged.connect(self._on_freq_filter_changed)
-        lyt.addWidget(self._freq_combo)
-
-        self._cutoff_w = QWidget()
-        cl = QHBoxLayout(self._cutoff_w)
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.addWidget(self._lbl("CUTOFF"))
-        self._cutoff_spin = QDoubleSpinBox()
-        self._cutoff_spin.setStyleSheet(SPINBOX_SS)
-        self._cutoff_spin.setRange(1.0, 200.0)
-        self._cutoff_spin.setValue(30.0)
-        cl.addWidget(self._cutoff_spin)
-        lyt.addWidget(self._cutoff_w)
-
-        self._order_w = QWidget()
-        ol = QHBoxLayout(self._order_w)
-        ol.setContentsMargins(0, 0, 0, 0)
-        ol.addWidget(self._lbl("ORDER"))
-        self._order_spin = QSpinBox()
-        self._order_spin.setStyleSheet(SPINBOX_SS)
-        self._order_spin.setRange(1, 10)
-        self._order_spin.setValue(2)
-        ol.addWidget(self._order_spin)
-        lyt.addWidget(self._order_w)
-
-        self._low_w = QWidget()
-        ll = QHBoxLayout(self._low_w)
-        ll.setContentsMargins(0, 0, 0, 0)
-        ll.addWidget(self._lbl("LOW CUTOFF"))
-        self._low_spin = QDoubleSpinBox()
-        self._low_spin.setStyleSheet(SPINBOX_SS)
-        self._low_spin.setRange(1.0, 200.0)
-        self._low_spin.setValue(10.0)
-        ll.addWidget(self._low_spin)
-        lyt.addWidget(self._low_w)
-
-        self._high_w = QWidget()
-        hl = QHBoxLayout(self._high_w)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.addWidget(self._lbl("HIGH CUTOFF"))
-        self._high_spin = QDoubleSpinBox()
-        self._high_spin.setStyleSheet(SPINBOX_SS)
-        self._high_spin.setRange(1.0, 200.0)
-        self._high_spin.setValue(50.0)
-        hl.addWidget(self._high_spin)
-        lyt.addWidget(self._high_w)
-
-        apply_freq_btn = QPushButton("APPLY FREQUENCY FILTER")
-        apply_freq_btn.setStyleSheet(APPLY_BTN_SS)
-        apply_freq_btn.clicked.connect(self._apply_freq)
-        lyt.addWidget(apply_freq_btn)
+        self._apply_spatial_btn = QPushButton("APPLY SPATIAL FILTER")
+        self._apply_spatial_btn.setStyleSheet(operation_btn_style())
+        self._apply_spatial_btn.clicked.connect(self._apply_spatial)
+        lyt.addWidget(self._apply_spatial_btn)
 
         lyt.addStretch()
 
         scroll.setWidget(w)
 
         self._on_filter_changed(0)
-        self._on_freq_filter_changed(0)
         return scroll
 
     # ---- GEOMETRIC tab ----
@@ -451,10 +348,10 @@ class FilterPanel(QWidget):
         angle_row.addWidget(self._angle_spin)
         lyt.addLayout(angle_row)
 
-        rotate_btn = QPushButton("APPLY ROTATION")
-        rotate_btn.setStyleSheet(APPLY_BTN_SS)
-        rotate_btn.clicked.connect(self._apply_rotation)
-        lyt.addWidget(rotate_btn)
+        self._rotate_btn = QPushButton("APPLY ROTATION")
+        self._rotate_btn.setStyleSheet(operation_btn_style())
+        self._rotate_btn.clicked.connect(self._apply_rotation)
+        lyt.addWidget(self._rotate_btn)
 
         lyt.addWidget(self._header("SHEAR"))
         sx_row = QHBoxLayout()
@@ -477,47 +374,10 @@ class FilterPanel(QWidget):
         sy_row.addWidget(self._shear_y_spin)
         lyt.addLayout(sy_row)
 
-        shear_btn = QPushButton("APPLY SHEAR")
-        shear_btn.setStyleSheet(APPLY_BTN_SS)
-        shear_btn.clicked.connect(self._apply_shear)
-        lyt.addWidget(shear_btn)
-        lyt.addStretch()
-        return w
-
-    # ---- INTERP tab ----
-
-    def _build_interp_tab(self) -> QWidget:
-        w = QWidget()
-        lyt = QVBoxLayout(w)
-        lyt.setContentsMargins(6, 6, 6, 6)
-        lyt.setSpacing(6)
-
-        lyt.addWidget(self._header("INTERPOLATION"))
-
-        self._interp_group = QButtonGroup(self)
-        self._nn_radio = QRadioButton("Nearest Neighbor")
-        self._bl_radio = QRadioButton("Bilinear")
-        self._nn_radio.setChecked(True)
-        self._interp_group.addButton(self._nn_radio, 0)
-        self._interp_group.addButton(self._bl_radio, 1)
-        lyt.addWidget(self._nn_radio)
-        lyt.addWidget(self._bl_radio)
-
-        lyt.addWidget(self._header("ZOOM"))
-        zoom_row = QHBoxLayout()
-        zoom_row.addWidget(self._lbl("FACTOR"))
-        self._zoom_spin = QDoubleSpinBox()
-        self._zoom_spin.setStyleSheet(SPINBOX_SS)
-        self._zoom_spin.setRange(0.1, 8.0)
-        self._zoom_spin.setSingleStep(0.1)
-        self._zoom_spin.setValue(1.0)
-        zoom_row.addWidget(self._zoom_spin)
-        lyt.addLayout(zoom_row)
-
-        zoom_btn = QPushButton("APPLY ZOOM")
-        zoom_btn.setStyleSheet(APPLY_BTN_SS)
-        zoom_btn.clicked.connect(self._apply_zoom)
-        lyt.addWidget(zoom_btn)
+        self._shear_btn = QPushButton("APPLY SHEAR")
+        self._shear_btn.setStyleSheet(operation_btn_style())
+        self._shear_btn.clicked.connect(self._apply_shear)
+        lyt.addWidget(self._shear_btn)
         lyt.addStretch()
         return w
 
@@ -532,19 +392,12 @@ class FilterPanel(QWidget):
         self._q_container.setVisible(name == "Contra-Harmonic")
         self._maxwin_container.setVisible(name == "Adaptive Median")
         self._custom_btn.setVisible(name == "Custom Kernel")
-        has_kernel = name in ("Average", "Gaussian", "Median", "Custom Kernel")
+        has_kernel = name in ("Average", "Gaussian", "Median", "Custom Kernel", "Sobel", "Prewitt")
         self._kernel_table.setVisible(has_kernel)
         self._kernel_preview_lbl.setVisible(has_kernel)
+        if not has_kernel and hasattr(self, '_kernel_note_lbl'):
+            self._kernel_note_lbl.setVisible(False)
         self._update_kernel_preview()
-
-    def _on_freq_filter_changed(self, idx: int):
-        name = self._freq_combo.currentText()
-        is_band = name in ("Bandpass", "Bandreject")
-        is_butter = "Butterworth" in name
-        self._cutoff_w.setVisible(not is_band)
-        self._order_w.setVisible(is_butter)
-        self._low_w.setVisible(is_band)
-        self._high_w.setVisible(is_band)
 
     def _update_kernel_preview(self):
         p = _get_theme()
@@ -552,6 +405,10 @@ class FilterPanel(QWidget):
         size = self._ksize_group.checkedId()
         if size <= 0:
             size = 3
+
+        is_sobel_prewitt = name in ("Sobel", "Prewitt")
+        dir_id = self._dir_group.checkedId() if hasattr(self, '_dir_group') else -1
+        is_mag = (dir_id == 2)
 
         if name == "Average":
             k = np.ones((size, size)) / (size * size)
@@ -561,8 +418,21 @@ class FilterPanel(QWidget):
             k = np.ones((size, size)) / (size * size)
         elif name == "Custom Kernel":
             k = self._custom_kernel if self._custom_kernel is not None else np.zeros((size, size))
+        elif name == "Sobel":
+            kh = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], float)
+            kv = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], float)
+            k = kv if dir_id == 1 else kh
+        elif name == "Prewitt":
+            kh = np.array([[-1, 0, 1], [-1, 0, 1], [-1, 0, 1]], float)
+            kv = np.array([[-1, -1, -1], [0, 0, 0], [1, 1, 1]], float)
+            k = kv if dir_id == 1 else kh
         else:
+            if hasattr(self, '_kernel_note_lbl'):
+                self._kernel_note_lbl.setVisible(False)
             return
+
+        if hasattr(self, '_kernel_note_lbl'):
+            self._kernel_note_lbl.setVisible(is_sobel_prewitt and is_mag)
 
         rows, cols = k.shape
         self._kernel_table.setRowCount(rows)
@@ -601,14 +471,21 @@ class FilterPanel(QWidget):
     # Apply operations
     # ------------------------------------------------------------------
 
-    def _start_worker(self, fn, op_name: str, **kwargs):
+    def _start_worker(self, fn, op_name: str, btn=None, btn_label=None, **kwargs):
         if self._state is None:
             return
         if self._worker and self._worker.isRunning():
             return
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("⟳ Processing...")
         self._worker = PipelineWorker(fn, op_name, self._state, **kwargs)
         self._worker.finished.connect(self.filter_applied)
         self._worker.error.connect(self.error_occurred)
+        if btn is not None:
+            orig = btn_label or op_name
+            self._worker.finished.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
+            self._worker.error.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
         self._worker.start()
 
     def _apply_spatial(self):
@@ -626,66 +503,49 @@ class FilterPanel(QWidget):
 
         if name == "Average":
             from processing.spatial.smoothing import average_filter
-            self._start_worker(average_filter, "Average Filter", kernel_size=size)
+            self._start_worker(average_filter, "Average Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size)
         elif name == "Gaussian":
             from processing.spatial.smoothing import gaussian_filter
-            self._start_worker(gaussian_filter, "Gaussian Filter", kernel_size=size, sigma=sigma)
+            self._start_worker(gaussian_filter, "Gaussian Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size, sigma=sigma)
         elif name == "Median":
             from processing.spatial.median_filter import median_filter
-            self._start_worker(median_filter, "Median Filter", kernel_size=size)
+            self._start_worker(median_filter, "Median Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size)
         elif name == "Sobel":
-            self._start_worker(_sobel_fn, f"Sobel {direction.title()}", direction=direction)
+            self._start_worker(_sobel_fn, f"Sobel {direction.title()}", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", direction=direction)
         elif name == "Prewitt":
-            self._start_worker(_prewitt_fn, f"Prewitt {direction.title()}", direction=direction)
+            self._start_worker(_prewitt_fn, f"Prewitt {direction.title()}", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", direction=direction)
         elif name == "Harmonic Mean":
             from processing.spatial.mean_filters import harmonic_mean_filter
-            self._start_worker(harmonic_mean_filter, "Harmonic Mean", kernel_size=size)
+            self._start_worker(harmonic_mean_filter, "Harmonic Mean", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size)
         elif name == "Contra-Harmonic":
             from processing.spatial.mean_filters import contraharmonic_mean_filter
-            self._start_worker(contraharmonic_mean_filter, "Contra-Harmonic", kernel_size=size, Q=q)
+            self._start_worker(contraharmonic_mean_filter, "Contra-Harmonic", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size, Q=q)
         elif name == "Midpoint":
             from processing.spatial.order_statistic_filters import midpoint_filter
-            self._start_worker(midpoint_filter, "Midpoint Filter", kernel_size=size)
+            self._start_worker(midpoint_filter, "Midpoint Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size)
         elif name == "Min":
             from processing.spatial.order_statistic_filters import min_filter
-            self._start_worker(min_filter, "Min Filter", kernel_size=size)
+            self._start_worker(min_filter, "Min Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size)
         elif name == "Max":
             from processing.spatial.order_statistic_filters import max_filter
-            self._start_worker(max_filter, "Max Filter", kernel_size=size)
+            self._start_worker(max_filter, "Max Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel_size=size)
         elif name == "Adaptive Median":
             from processing.spatial.adaptive_median import adaptive_median_filter
-            self._start_worker(adaptive_median_filter, "Adaptive Median", max_window=max_window)
+            self._start_worker(adaptive_median_filter, "Adaptive Median", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", max_window=max_window)
         elif name == "Custom Kernel":
             if self._custom_kernel is None:
                 self.error_occurred.emit("No custom kernel defined.")
                 return
-            self._start_worker(_custom_fn, "Custom Filter", kernel=self._custom_kernel)
-
-    def _apply_freq(self):
-        name = self._freq_combo.currentText()
-        self._start_worker(
-            _freq_filter_fn, f"Freq: {name}",
-            filter_type=name,
-            cutoff=self._cutoff_spin.value(),
-            order=self._order_spin.value(),
-            low_cutoff=self._low_spin.value(),
-            high_cutoff=self._high_spin.value(),
-        )
+            self._start_worker(_custom_fn, "Custom Filter", btn=self._apply_spatial_btn, btn_label="APPLY SPATIAL FILTER", kernel=self._custom_kernel)
 
     def _apply_rotation(self):
         from processing.geometric.rotation import rotate_image
-        self._start_worker(rotate_image, "Rotate", angle_deg=self._angle_spin.value())
+        self._start_worker(rotate_image, "Rotate", btn=self._rotate_btn, btn_label="APPLY ROTATION", angle_deg=self._angle_spin.value())
 
     def _apply_shear(self):
         from processing.geometric.shearing import shear_image
         self._start_worker(shear_image, "Shear",
+                           btn=self._shear_btn, btn_label="APPLY SHEAR",
                            shear_x=self._shear_x_spin.value(),
                            shear_y=self._shear_y_spin.value())
 
-    def _apply_zoom(self):
-        from processing.interpolation.zoom import apply_zoom
-        mode = 'bilinear' if self._bl_radio.isChecked() else 'nearest'
-        self.interp_changed.emit(mode)
-        self._start_worker(apply_zoom, "Zoom",
-                           zoom_factor=self._zoom_spin.value(),
-                           mode=mode)

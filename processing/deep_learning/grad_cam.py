@@ -54,7 +54,8 @@ def compute_gradcam(image: np.ndarray, roi: tuple | None = None,
 
     grad_model = _load_grad_model()
     meta = _load_metadata()
-    sz   = int(meta.get('input_size', [224, 224])[0])
+    _sz  = meta.get('input_size', [224, 224])
+    sz   = int(_sz[0] if isinstance(_sz, (list, tuple)) else _sz)
 
     if roi is not None:
         x, y, w, h = roi

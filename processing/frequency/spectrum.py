@@ -7,9 +7,15 @@ import numpy as np
 from utils.image_utils import validate_grayscale, normalize_to_uint8
 from utils.error_handler import wrap_errors
 
+_cache: dict = {'image_id': None, 'result': None}
+
 
 @wrap_errors
 def compute_spectrum(image: np.ndarray) -> tuple:
+    global _cache
+    img_id = id(image)
+    if _cache['image_id'] == img_id and _cache['result'] is not None:
+        return _cache['result']
     validate_grayscale(image)
     base = image.astype(np.float64)
 
@@ -19,7 +25,9 @@ def compute_spectrum(image: np.ndarray) -> tuple:
     log_magnitude = np.log1p(np.abs(shifted_fft))
     phase         = np.angle(shifted_fft)
 
-    return shifted_fft, log_magnitude, phase
+    result = shifted_fft, log_magnitude, phase
+    _cache = {'image_id': img_id, 'result': result}
+    return result
 
 
 @wrap_errors

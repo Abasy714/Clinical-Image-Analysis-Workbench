@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal
 
 from gui.theme import get as _get_theme
-from gui.styles import btn_style, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.styles import btn_style, operation_btn_style, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
 from gui.workers import PipelineWorker
 
 # ------------------------------------------------------------------
@@ -48,21 +48,17 @@ def _predict_fn(image, roi, input_size, _ref):
 
 
 def _gradcam_fn(image, roi, alpha, _ref):
-    from processing.deep_learning.grad_cam import compute_gradcam, overlay_heatmap
-    result = compute_gradcam(image, roi)
+    from processing.deep_learning.grad_cam import compute_gradcam
+    result = compute_gradcam(image, roi, alpha=alpha)
     _ref[0] = result
-    if isinstance(result, np.ndarray):
-        return overlay_heatmap(image, result, alpha=alpha)
-    return image
+    return result
 
 
 def _scorecam_fn(image, roi, alpha, _ref):
-    from processing.deep_learning.score_cam import compute_scorecam, overlay_heatmap
-    result = compute_scorecam(image, roi)
+    from processing.deep_learning.score_cam import compute_scorecam
+    result = compute_scorecam(image, roi, alpha=alpha)
     _ref[0] = result
-    if isinstance(result, np.ndarray):
-        return overlay_heatmap(image, result, alpha=alpha)
-    return image
+    return result
 
 
 # ------------------------------------------------------------------
@@ -130,7 +126,9 @@ class AIPanel(QWidget):
         super().__init__(parent)
         self._state = None
         self._worker: PipelineWorker | None = None
+        self._preload_worker: PipelineWorker | None = None
         self._roi: tuple | None = None
+        self._pending_roi: np.ndarray | None = None
         self._model_loaded = False
         self._input_size   = [224, 224]
         self._predict_ref:  list = [None]
@@ -138,6 +136,8 @@ class AIPanel(QWidget):
         self._scorecam_ref: list = [None]
         self._build_ui()
         self._load_metadata()
+        if os.path.exists(_CLASSIFIER_H5):
+            self._start_preload()
 
     def set_state(self, state):
         self._state = state
@@ -145,6 +145,10 @@ class AIPanel(QWidget):
 
     def set_roi(self, x: int, y: int, w: int, h: int):
         self._roi = (x, y, w, h)
+        self._refresh()
+
+    def clear_roi(self):
+        self._roi = None
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -189,7 +193,7 @@ class AIPanel(QWidget):
         # ---- Classify ROI ----
         lyt.addWidget(self._header("CLASSIFY ROI"))
         self._classify_btn = QPushButton("RUN CLASSIFIER")
-        self._classify_btn.setStyleSheet(APPLY_BTN_SS)
+        self._classify_btn.setStyleSheet(operation_btn_style())
         self._classify_btn.setEnabled(False)
         self._classify_btn.clicked.connect(self._apply_classify)
         lyt.addWidget(self._classify_btn)
@@ -217,7 +221,7 @@ class AIPanel(QWidget):
         lyt.addLayout(gc_row)
 
         self._gradcam_btn = QPushButton("GENERATE GRAD-CAM")
-        self._gradcam_btn.setStyleSheet(APPLY_BTN_SS)
+        self._gradcam_btn.setStyleSheet(operation_btn_style())
         self._gradcam_btn.setEnabled(False)
         self._gradcam_btn.clicked.connect(self._apply_gradcam)
         lyt.addWidget(self._gradcam_btn)
@@ -237,7 +241,7 @@ class AIPanel(QWidget):
         lyt.addLayout(sc_row)
 
         self._scorecam_btn = QPushButton("GENERATE SCORE-CAM")
-        self._scorecam_btn.setStyleSheet(APPLY_BTN_SS)
+        self._scorecam_btn.setStyleSheet(operation_btn_style())
         self._scorecam_btn.setEnabled(False)
         self._scorecam_btn.clicked.connect(self._apply_scorecam)
         lyt.addWidget(self._scorecam_btn)
@@ -246,10 +250,10 @@ class AIPanel(QWidget):
 
         # ---- Enhancement suggestions ----
         lyt.addWidget(self._header("SUGGESTIONS"))
-        analyze_btn = QPushButton("ANALYZE IMAGE")
-        analyze_btn.setStyleSheet(btn_style('default'))
-        analyze_btn.clicked.connect(self._analyze_suggestions)
-        lyt.addWidget(analyze_btn)
+        self._analyze_btn = QPushButton("ANALYZE IMAGE")
+        self._analyze_btn.setStyleSheet(btn_style('default'))
+        self._analyze_btn.clicked.connect(self._analyze_suggestions)
+        lyt.addWidget(self._analyze_btn)
 
         self._suggestions_container = QWidget()
         chips_lyt = QVBoxLayout(self._suggestions_container)
@@ -287,6 +291,36 @@ class AIPanel(QWidget):
     # ------------------------------------------------------------------
     # Metadata / model loading
     # ------------------------------------------------------------------
+
+    def _start_preload(self):
+        from processing.deep_learning import predictor
+
+        class _DummyState:
+            def get_base_image(self):
+                return np.zeros((4, 4, 3), dtype=np.uint8)
+
+        def _preload_fn(image):
+            predictor.preload()
+            return image
+
+        self._preload_worker = PipelineWorker(_preload_fn, "_preload", _DummyState())
+        self._preload_worker.finished.connect(self._on_preload_done)
+        self._preload_worker.error.connect(self._on_preload_error)
+        self._preload_worker.start()
+
+    def _on_preload_done(self, _op: str, _result):
+        from processing.deep_learning import predictor
+        if predictor.is_ready():
+            p = _get_theme()
+            self._status_lbl.setText("READY")
+            self._status_lbl.setStyleSheet(
+                f"color: {p['ACCENT']}; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px;"
+            )
+            self._model_loaded = True
+            self._refresh()
+
+    def _on_preload_error(self, _msg: str):
+        pass
 
     def _load_metadata(self):
         if not os.path.exists(_METADATA_JSON):
@@ -347,31 +381,70 @@ class AIPanel(QWidget):
     # Operations
     # ------------------------------------------------------------------
 
-    def _start_worker(self, fn, op_name: str, on_done, **kwargs):
+    def _start_worker(self, fn, op_name: str, on_done, btn=None, btn_label=None, **kwargs):
         if self._state is None or (self._worker and self._worker.isRunning()):
             return
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("⟳ Processing...")
         self._worker = PipelineWorker(fn, op_name, self._state, **kwargs)
         self._worker.finished.connect(on_done)
         self._worker.error.connect(self.error_occurred)
+        if btn is not None:
+            orig = btn_label or op_name
+            self._worker.finished.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
+            self._worker.error.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
         self._worker.start()
 
     def _apply_classify(self):
-        if self._state is None or self._roi is None:
+        if self._state is None:
+            self.error_occurred.emit('No state — load an image first')
             return
-        self._predict_ref = [None]
-        ref = self._predict_ref
-        roi = self._roi
-        sz  = tuple(self._input_size)
+        img = self._state.get_base_image()
+        if img is None or not isinstance(img, np.ndarray):
+            self.error_occurred.emit(f'No image loaded (got {type(img).__name__})')
+            return
+        if self._roi is None:
+            self.error_occurred.emit('Select an ROI first')
+            return
 
-        def _fn(image):
-            return _predict_fn(image, roi, sz, ref)
+        x, y, w, h = self._roi
+        H_img, W_img = img.shape[:2]
+        x = max(0, min(int(x), W_img - 1))
+        y = max(0, min(int(y), H_img - 1))
+        w = max(1, min(int(w), W_img - x))
+        h = max(1, min(int(h), H_img - y))
+        roi_crop = img[y:y + h, x:x + w]
 
-        self._start_worker(_fn, "Classify ROI", self._on_classify_done)
+        if roi_crop.size == 0 or roi_crop.ndim < 2:
+            self.error_occurred.emit(f'ROI is empty: shape={roi_crop.shape}')
+            return
+
+        self._pending_roi = np.array(roi_crop, dtype=np.uint8, copy=True)
+        import processing.deep_learning.predictor as _pred_mod
+        pending = self._pending_roi
+
+        def _classify_fn(image):
+            if pending is None or not isinstance(pending, np.ndarray):
+                raise ValueError(f'pending_roi invalid: {type(pending).__name__}')
+            _pred_mod.predict(pending)
+            from utils.image_utils import normalize_to_uint8
+            return normalize_to_uint8(pending)
+
+        self._start_worker(_classify_fn, "AI Classify", self._on_classify_done,
+                           btn=self._classify_btn, btn_label="RUN CLASSIFIER")
 
     def _on_classify_done(self, _op: str, result: np.ndarray):
-        data = self._predict_ref[0]
+        import processing.deep_learning.predictor as _pred_mod
+        data = _pred_mod.get_last_prediction()
         probs: list[float] = []
-        if isinstance(data, (list, tuple)) and len(data) > 0:
+        if isinstance(data, dict):
+            all_scores = data.get('all_scores', {})
+            if isinstance(all_scores, dict):
+                probs = [float(v) for v in all_scores.values()]
+            elif isinstance(all_scores, (list, np.ndarray)):
+                probs = [float(v) for v in all_scores]
+        elif isinstance(data, (list, tuple)) and len(data) > 0:
             inner = data[0] if isinstance(data[0], (list, np.ndarray)) else data
             probs = [float(v) for v in inner]
         elif isinstance(data, np.ndarray):
@@ -398,7 +471,7 @@ class AIPanel(QWidget):
         def _fn(image):
             return _gradcam_fn(image, roi, alpha, ref)
 
-        self._start_worker(_fn, "Grad-CAM", lambda n, r: self.ai_applied.emit(n, r))
+        self._start_worker(_fn, "Grad-CAM", lambda n, r: self.ai_applied.emit(n, r), btn=self._gradcam_btn, btn_label="GENERATE GRAD-CAM")
 
     def _apply_scorecam(self):
         if self._state is None or self._roi is None:
@@ -411,7 +484,7 @@ class AIPanel(QWidget):
         def _fn(image):
             return _scorecam_fn(image, roi, alpha, ref)
 
-        self._start_worker(_fn, "Score-CAM", lambda n, r: self.ai_applied.emit(n, r))
+        self._start_worker(_fn, "Score-CAM", lambda n, r: self.ai_applied.emit(n, r), btn=self._scorecam_btn, btn_label="GENERATE SCORE-CAM")
 
     def _analyze_suggestions(self):
         if self._state is None:
