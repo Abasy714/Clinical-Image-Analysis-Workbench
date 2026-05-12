@@ -1,239 +1,232 @@
-# STATUS: IMPLEMENTED
-"""
-Panel for binary morphological operations on thresholded medical images.
-User can binarize the image, choose structuring element shape and size, and apply erosion, dilation, opening, closing, or boundary extraction.
-"""
-
 import numpy as np
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                              QSlider, QLabel, QGridLayout, QButtonGroup,
-                              QRadioButton, QFrame, QSizePolicy)
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QSpinBox, QButtonGroup, QRadioButton, QSlider,
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
-from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, TEXT, MUTED, MUTED2, btn_style,
-                        HEADER_SS, FIELD_SS, APPLY_BTN_SS)
-from utils import (validate_grayscale, binarize, normalize_to_uint8, wrap_errors, show_error_dialog,)
+from gui.theme import get as _get_theme
+from gui.styles import btn_style, operation_btn_style, SPINBOX_SS, HEADER_SS, FIELD_SS
+from gui.workers import PipelineWorker
 
 
 class MorphologyPanel(QWidget):
     morphology_applied = pyqtSignal(str, np.ndarray)
+    error_occurred     = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._source_image: np.ndarray | None = None
-        self._binary_image: np.ndarray | None = None
+        self._state = None
+        self._worker: PipelineWorker | None = None
+        self._build_ui()
 
-        self.setStyleSheet(f"background:{PANEL};")
+    def set_state(self, state):
+        self._state = state
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_morph_content())
 
-        # ---- header ----
-        hdr = QLabel("MORPHOLOGY")
-        hdr.setStyleSheet(HEADER_SS)
-        layout.addWidget(hdr)
+    def _lbl(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(FIELD_SS)
+        return lbl
 
-        # ---- binarization section ----
-        bin_lbl = QLabel("BINARIZATION")
-        bin_lbl.setStyleSheet(HEADER_SS)
-        layout.addWidget(bin_lbl)
+    def _header(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(HEADER_SS)
+        return lbl
 
-        slider_row = QWidget()
-        srl = QHBoxLayout(slider_row)
-        srl.setContentsMargins(0, 0, 0, 0)
-        srl.setSpacing(8)
+    def _build_morph_content(self) -> QWidget:
+        p = _get_theme()
+        w = QWidget()
+        lyt = QVBoxLayout(w)
+        lyt.setContentsMargins(8, 8, 8, 8)
+        lyt.setSpacing(6)
 
-        self._threshold_slider = QSlider(Qt.Orientation.Horizontal)
-        self._threshold_slider.setRange(0, 255)
-        self._threshold_slider.setValue(128)
-        self._threshold_slider.setStyleSheet("""
-            QSlider::groove:horizontal {
-                height: 3px;
-                background: #353730;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                width: 13px;
-                height: 13px;
-                margin: -5px 0;
-                background: #c8f135;
-                border-radius: 7px;
-                border: 2px solid #0d1002;
-            }
-            QSlider::sub-page:horizontal {
-                background: #c8f135;
-                border-radius: 2px;
-            }
-            QSlider::add-page:horizontal {
-                background: #353730;
-                border-radius: 2px;
-            }
-        """)
-        srl.addWidget(self._threshold_slider)
+        # ---- Binarization threshold ----
+        lyt.addWidget(self._header("BINARIZATION"))
+        thresh_row = QHBoxLayout()
+        self._morph_thresh_slider = QSlider(Qt.Orientation.Horizontal)
+        self._morph_thresh_slider.setRange(0, 255)
+        self._morph_thresh_slider.setValue(128)
+        self._morph_thresh_spin = QSpinBox()
+        self._morph_thresh_spin.setStyleSheet(SPINBOX_SS)
+        self._morph_thresh_spin.setRange(0, 255)
+        self._morph_thresh_spin.setValue(128)
+        self._morph_thresh_spin.setFixedWidth(52)
+        self._morph_thresh_val_lbl = QLabel("[128]")
+        self._morph_thresh_val_lbl.setStyleSheet(
+            f"color: {p['ACCENT']}; font-family: 'JetBrains Mono', Consolas, monospace;"
+            f" font-size: 10px;"
+        )
+        self._morph_thresh_val_lbl.setFixedWidth(38)
+        thresh_row.addWidget(self._morph_thresh_slider)
+        thresh_row.addWidget(self._morph_thresh_spin)
+        thresh_row.addWidget(self._morph_thresh_val_lbl)
+        lyt.addLayout(thresh_row)
 
-        self._thresh_val_lbl = QLabel("128")
-        self._thresh_val_lbl.setFixedWidth(30)
-        self._thresh_val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._thresh_val_lbl.setStyleSheet("""
-            QLabel {
-                color: #c8f135;
-                font-family: 'JetBrains Mono', Consolas, monospace;
-                font-size: 13px;
-                font-weight: bold;
-            }
-        """)
-        srl.addWidget(self._thresh_val_lbl)
-        layout.addWidget(slider_row)
+        pre_op_lbl = QLabel("Pre-op threshold")
+        pre_op_lbl.setStyleSheet(
+            f"color: {p['MUTED']}; font-size: 8px;"
+            f" font-family: 'JetBrains Mono', Consolas, monospace;"
+        )
+        lyt.addWidget(pre_op_lbl)
 
-        self._threshold_slider.valueChanged.connect(self._on_threshold_changed)
+        self._morph_thresh_preview = QLabel()
+        self._morph_thresh_preview.setFixedHeight(60)
+        self._morph_thresh_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._morph_thresh_preview.setStyleSheet(
+            f"background: {p['BG']}; border: 1px solid {p['BORDER']};"
+        )
+        lyt.addWidget(self._morph_thresh_preview)
 
-        # divider
-        layout.addWidget(_hdiv())
+        self._morph_thresh_timer = QTimer(self)
+        self._morph_thresh_timer.setSingleShot(True)
+        self._morph_thresh_timer.setInterval(400)
+        self._morph_thresh_timer.timeout.connect(self._preview_morph_thresh)
 
+        def _on_thresh_changed(v: int):
+            self._morph_thresh_spin.setValue(v)
+            self._morph_thresh_val_lbl.setText(f"[{v}]")
+            self._morph_thresh_timer.start()
 
-        # ---- structuring element ----
-        se_lbl = QLabel("STRUCTURING ELEMENT")
-        se_lbl.setStyleSheet(HEADER_SS)
-        layout.addWidget(se_lbl)
+        self._morph_thresh_slider.valueChanged.connect(_on_thresh_changed)
+        self._morph_thresh_spin.valueChanged.connect(self._morph_thresh_slider.setValue)
 
-        shape_row = QWidget()
-        shrl = QHBoxLayout(shape_row)
-        shrl.setContentsMargins(0, 0, 0, 0)
-        shrl.setSpacing(4)
-        shape_field_lbl = QLabel("Shape")
-        shape_field_lbl.setStyleSheet(FIELD_SS)
-        shrl.addWidget(shape_field_lbl)
+        # ---- SE SHAPE ----
+        radio_ss = (
+            f"QRadioButton {{ color: {p['TEXT']}; "
+            f"font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px; }}"
+        )
+
+        lyt.addWidget(self._header("SE SHAPE"))
         self._shape_group = QButtonGroup(self)
-        for label in ("Square", "Cross"):
-            rb = QRadioButton(label)
-            rb.setStyleSheet(f"color:{TEXT};font-size:9px;")
-            self._shape_group.addButton(rb)
-            shrl.addWidget(rb)
-            if label == "Square":
+        shape_row = QHBoxLayout()
+        for i, name in enumerate(["Square", "Cross", "Disk"]):
+            rb = QRadioButton(name)
+            rb.setStyleSheet(radio_ss)
+            if i == 0:
                 rb.setChecked(True)
-        shrl.addStretch()
-        layout.addWidget(shape_row)
+            self._shape_group.addButton(rb, i)
+            shape_row.addWidget(rb)
+        lyt.addLayout(shape_row)
 
-        size_row = QWidget()
-        szrl = QHBoxLayout(size_row)
-        szrl.setContentsMargins(0, 0, 0, 0)
-        szrl.setSpacing(4)
-        size_field_lbl = QLabel("Size")
-        size_field_lbl.setStyleSheet(FIELD_SS)
-        szrl.addWidget(size_field_lbl)
+        lyt.addWidget(self._header("SE SIZE"))
         self._size_group = QButtonGroup(self)
-        for sz in (3, 5, 7):
-            rb = QRadioButton(f"{sz}×{sz}")
-            rb.setProperty("sz", sz)
-            rb.setStyleSheet(f"color:{TEXT};font-size:9px;")
-            self._size_group.addButton(rb)
-            szrl.addWidget(rb)
-            if sz == 3:
+        size_row = QHBoxLayout()
+        for i, sz in enumerate([3, 5, 7, 9]):
+            rb = QRadioButton(str(sz))
+            rb.setStyleSheet(radio_ss)
+            if i == 0:
                 rb.setChecked(True)
-        szrl.addStretch()
-        layout.addWidget(size_row)
+            self._size_group.addButton(rb, sz)
+            size_row.addWidget(rb)
+        lyt.addLayout(size_row)
 
-        # divider
-        layout.addWidget(_hdiv())
+        lyt.addWidget(self._header("OPERATIONS"))
 
-        # ---- operations ----
-        ops_lbl = QLabel("OPERATIONS")
-        ops_lbl.setStyleSheet(HEADER_SS)
-        layout.addWidget(ops_lbl)
+        ops = [
+            ("Erode",      "erode",          "Erode"),
+            ("Dilate",     "dilate",         "Dilate"),
+            ("Open",       "open",           "Open"),
+            ("Close",      "close",          "Close"),
+            ("Boundary",   "boundary",       "Boundary"),
+            ("Gradient",   "gradient",       "Gradient"),
+            ("Top Hat W",  "white_top_hat",  "White Top Hat"),
+            ("Top Hat B",  "black_top_hat",  "Black Top Hat"),
+        ]
 
-        ops_grid = QWidget()
-        og = QGridLayout(ops_grid)
-        og.setContentsMargins(0, 0, 0, 0)
-        og.setSpacing(6)
-
-        for i, (label, op) in enumerate([("Erode", "Erode"), ("Dilate", "Dilate"),
-                                          ("Open", "Open"), ("Close", "Close")]):
+        col_left  = QVBoxLayout()
+        col_right = QVBoxLayout()
+        col_left.setSpacing(4)
+        col_right.setSpacing(4)
+        for idx, (label, operation, op_name) in enumerate(ops):
             btn = QPushButton(label)
-            btn.setStyleSheet(btn_style())
-            btn.clicked.connect(lambda checked, o=op: self._apply_op(o))
-            og.addWidget(btn, i // 2, i % 2)
-        layout.addWidget(ops_grid)
-
-        boundary_btn = QPushButton("Extract Boundary")
-        boundary_btn.setStyleSheet(APPLY_BTN_SS)
-        boundary_btn.clicked.connect(lambda: self._apply_op("Boundary"))
-        layout.addWidget(boundary_btn)
-
-        hint = QLabel("Boundary = A − (A ⊖ B)")
-        hint.setStyleSheet(f"color:{MUTED2};font-size:9px;")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(hint)
-
-        layout.addStretch()
-
-    # ------------------------------------------------------------------ public
-
-    def set_image(self, image: np.ndarray):
-        try:
-            validate_grayscale(image)
-        except ValueError:
-            return
-        self._source_image = image
-        self._on_threshold_changed(self._threshold_slider.value())
-
-    # ------------------------------------------------------------------ private
-
-    def _on_threshold_changed(self, value: int):
-        self._thresh_val_lbl.setText(str(value))
-        if self._source_image is not None:
-            self._binary_image = binarize(self._source_image, value)
-
-     
-
-    def _get_se(self) -> np.ndarray:
-        size = 3
-        for btn in self._size_group.buttons():
-            if btn.isChecked():
-                size = btn.property("sz")
-                break
-        shape_btn = self._shape_group.checkedButton()
-        shape = shape_btn.text() if shape_btn else "Square"
-        if shape == "Cross":
-            from processing.morphology.structuring_element import get_cross_se
-            return get_cross_se(size)
-        from processing.morphology.structuring_element import get_square_se
-        return get_square_se(size)
-
-    def _apply_op(self, op_name: str):
-        if self._binary_image is None:
-            show_error_dialog("No image", "Load and threshold an image first.")
-            return
-        try: 
-            se = self._get_se()
-
-            if op_name == "Erode":
-                from processing.morphology.erosion_dilation import erode
-                result = erode(self._binary_image, se)
-            elif op_name == "Dilate":
-                from processing.morphology.erosion_dilation import dilate
-                result = dilate(self._binary_image, se)
-            elif op_name == "Open":
-                from processing.morphology.opening_closing import opening
-                result = opening(self._binary_image, se)
-            elif op_name == "Close":
-                from processing.morphology.opening_closing import closing
-                result = closing(self._binary_image, se)
-            elif op_name == "Boundary":
-                from processing.morphology.boundary_extraction import extract_boundary
-                result = extract_boundary(self._binary_image, se)
+            btn.setStyleSheet(operation_btn_style())
+            btn.clicked.connect(
+                lambda _, op=operation, n=op_name: self._apply_morph(op, n)
+            )
+            if idx % 2 == 0:
+                col_left.addWidget(btn)
             else:
-                return
- 
-            result = normalize_to_uint8(result.astype(np.uint8) * 255) #changed by sohaila
-        
-            self.morphology_applied.emit(op_name, result)
-        except (ImportError, NotImplementedError, Exception) as e:
-            show_error_dialog("Morphology Error", f"Operation '{op_name}' failed.\n{e}")
+                col_right.addWidget(btn)
 
+        btn_grid = QHBoxLayout()
+        btn_grid.setSpacing(4)
+        btn_grid.addLayout(col_left)
+        btn_grid.addLayout(col_right)
+        lyt.addLayout(btn_grid)
+        lyt.addStretch()
+        return w
 
-def _hdiv() -> QFrame:
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.HLine)
-    f.setStyleSheet(f"background:#2c2e2a;max-height:1px;")
-    return f
+    # ------------------------------------------------------------------
+    # SE helpers
+    # ------------------------------------------------------------------
+
+    def _se_params(self):
+        shape_map = {0: 'square', 1: 'cross', 2: 'disk'}
+        shape = shape_map.get(self._shape_group.checkedId(), 'square')
+        size  = self._size_group.checkedId()
+        if size <= 0:
+            size = 3
+        return shape, size
+
+    # ------------------------------------------------------------------
+    # Morphology operations
+    # ------------------------------------------------------------------
+
+    def _preview_morph_thresh(self):
+        if self._state is None:
+            return
+        image = self._state.get_base_image()
+        if image is None or not isinstance(image, np.ndarray):
+            return
+        from utils.image_utils import to_grayscale, normalize_to_uint8, to_qpixmap
+        t = self._morph_thresh_slider.value()
+        gray = normalize_to_uint8(to_grayscale(image))
+        binary = (gray > t).astype(np.uint8) * 255
+        w = self._morph_thresh_preview.width() or 200
+        h = self._morph_thresh_preview.height()
+        pix = to_qpixmap(binary).scaled(
+            w, h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self._morph_thresh_preview.setPixmap(pix)
+
+    def _apply_morph(self, operation: str, op_name: str):
+        if self._state is None:
+            return
+        if self._worker and self._worker.isRunning():
+            return
+        shape, size = self._se_params()
+        threshold = self._morph_thresh_slider.value()
+        full_name = f"{op_name} (t={threshold})"
+
+        def _fn(image, operation, se_shape, se_size, threshold):
+            from processing.morphology.pipeline_ops import apply_morphology
+            return apply_morphology(
+                image,
+                operation=operation,
+                se_shape=se_shape,
+                se_size=se_size,
+                threshold=threshold,
+            )
+
+        self._worker = PipelineWorker(
+            _fn, full_name, self._state,
+            operation=operation, se_shape=shape, se_size=size, threshold=threshold,
+        )
+        self._worker.finished.connect(self._on_morph_done)
+        self._worker.error.connect(self.error_occurred)
+        self._worker.start()
+
+    def _on_morph_done(self, op_name: str, result: np.ndarray):
+        self.morphology_applied.emit(op_name, result)

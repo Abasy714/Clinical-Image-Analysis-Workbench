@@ -1,4 +1,7 @@
 import numpy as np
+import logging
+
+_log = logging.getLogger('ciaw')
 
 
 def _pad_binary(binary: np.ndarray, pad_h: int, pad_w: int) -> np.ndarray:
@@ -16,7 +19,9 @@ def erode(binary: np.ndarray, se: np.ndarray) -> np.ndarray:
     padded = _pad_binary(binary, pad_h, pad_w) #pads image
     rows, cols = binary.shape #saves original shape
 
-#instead of looping on all neighbours, we use shifts
+    _log.debug("erode input sum: %s", int(binary.sum()))
+
+
     shifts = []
     for dr in range(se_h):
         for dc in range(se_w):
@@ -25,6 +30,8 @@ def erode(binary: np.ndarray, se: np.ndarray) -> np.ndarray:
                 shifts.append(shift)
     stacked = np.stack(shifts, axis=0) #stack all shifts in 3d array, each layer is img as seen from se neighbor position
     result = np.all(stacked, axis=0)#erosion rule: if all true,pixel stays true
+
+    _log.debug("erode output sum: %s", int(result.sum()))
     return result
 
 

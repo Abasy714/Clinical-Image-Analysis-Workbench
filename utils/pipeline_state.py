@@ -9,9 +9,6 @@ from collections import deque
 
 MAX_STACK_SIZE = 20
 
-_EMPTY = np.zeros((512, 512), dtype=np.uint8)
-
-
 class PipelineState:
     """
     Manages the sequential image enhancement pipeline.
@@ -27,23 +24,30 @@ class PipelineState:
     def set_original(self, image: np.ndarray):
         self._original = image.copy()
         self._stack.clear()
+        self._checkpoints.clear()
+
+    def has_image(self) -> bool:
+        """Return True after a real image has been loaded."""
+        return self._original is not None
 
     def push(self, op_name: str, image: np.ndarray):
+        if image is None:
+            raise ValueError("Cannot push an empty image into the pipeline.")
         self._stack.append((op_name, image.copy()))
 
-    def undo(self) -> np.ndarray:
+    def undo(self) -> np.ndarray | None:
         if self._stack:
             self._stack.pop()
         return self.current()
 
-    def reset(self) -> np.ndarray:
+    def reset(self) -> np.ndarray | None:
         self._stack.clear()
-        return self._original if self._original is not None else _EMPTY
+        return self._original
 
-    def current(self) -> np.ndarray:
+    def current(self) -> np.ndarray | None:
         if self._stack:
             return self._stack[-1][1]
-        return self._original if self._original is not None else _EMPTY
+        return self._original
 
     def get_stack_names(self) -> list:
         return [name for name, _ in self._stack]
@@ -52,9 +56,9 @@ class PipelineState:
         """Return list of (op_name, image) tuples from bottom to top."""
         return list(self._stack)
 
-    def get_original(self) -> np.ndarray:
-        """Return the original image set by set_original (or empty fallback)."""
-        return self._original if self._original is not None else _EMPTY
+    def get_original(self) -> np.ndarray | None:
+        """Return the original image set by set_original, or None if empty."""
+        return self._original
 
     def current_op(self) -> str:
         """Return the name of the top operation, or 'Original' if stack empty."""
@@ -75,7 +79,7 @@ class PipelineState:
         """Return current pipeline mode ('cumulative' or 'independent')."""
         return self._mode
 
-    def get_base_image(self) -> np.ndarray:
+    def get_base_image(self) -> np.ndarray | None:
         """
         Return the image that the NEXT operation should apply to.
         Cumulative: top of stack (or original if empty)
@@ -87,6 +91,8 @@ class PipelineState:
 
     def save_checkpoint(self, slot: str):
         img = self.current()
+        if img is None:
+            raise ValueError("No image loaded.")
         op = self._stack[-1][0] if self._stack else "original"
         self._checkpoints[slot] = (op, img.copy())
 

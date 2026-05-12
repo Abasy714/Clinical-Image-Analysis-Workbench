@@ -1,480 +1,610 @@
-# STATUS: IMPLEMENTED
-"""
-Image display widget with zoom controls and interactive ROI drawing.
-Powered entirely by custom interpolation — no built-in zoom libraries used.
-"""
-
-import logging
 import numpy as np
-from PyQt6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout,
-                              QPushButton, QScrollArea, QRubberBand, QSizePolicy, QFrame)
-from PyQt6.QtCore import Qt, QRect, QPoint, QSize, pyqtSignal, QEvent, QThread, QTimer
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QLabel,
+    QPushButton, QSizePolicy, QRubberBand, QGraphicsOpacityEffect,
+)
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QPoint, QRect, QSize, QEvent,
+    QPropertyAnimation, QAbstractAnimation,
+)
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QKeySequence, QShortcut
 
-from gui.styles import (BG, PANEL, BORDER, BORDER2, ACCENT, MUTED, MUTED2, btn_style)
-from utils import (to_qpixmap, normalize_to_uint8, wrap_errors,)
-
-
-class ZoomWorker(QThread):
-    """Runs zoom/resize in a background thread."""
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self._fn = fn
-
-    def run(self):
-        try:
-            result = self._fn()
-            self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(str(e))
+from utils.image_utils import to_qpixmap
+from processing.interpolation.zoom import apply_zoom
+from gui.workers import PipelineWorker
+from gui.theme import get as _get_theme
+from gui.widgets import ProgressStrip, RoiOverlay
 
 
-class _ImageLabel(QLabel):
-    """QLabel used for displaying the current image."""
+class _ArrayState:
+    def __init__(self, img: np.ndarray):
+        self._img = img
 
-
-def _sep() -> QWidget:
-    w = QWidget()
-    w.setFixedSize(1, 20)
-    w.setStyleSheet(f"background:{BORDER};")
-    return w
+    def get_base_image(self) -> np.ndarray:
+        return self._img
 
 
 class ImageViewer(QWidget):
-    _MIN_ZOOM = 1
-    _MAX_ZOOM = 1000
-
-    roi_selected = pyqtSignal(QRect)
-    zoom_changed = pyqtSignal(int)
-    coords_changed = pyqtSignal(int, int)
-    interp_changed = pyqtSignal(str)  # 'NN' or 'BL'
+    roi_selected   = pyqtSignal(int, int, int, int)
+    roi_cleared    = pyqtSignal()
+    interp_changed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._image: np.ndarray | None = None
-        self._display_image: np.ndarray | None = None
-        self._before_image: np.ndarray | None = None
-        self._showing_before: bool = False
-        self._zoom: int = 100
-        self._fit_to_window: bool = True
-        self._interp_mode: str = 'nearest'
-        self._roi: QRect | None = None
-        self._origin: QPoint = QPoint()
+        self._current_image: np.ndarray | None = None
+        self._before_image:  np.ndarray | None = None
+        self._view_mode  = 'after'
+        self._freq_mode  = False
+        self._zoom       = 1.0
+        self._interp     = 'nearest'
+        self._state      = None
+        self._workers: list = []
+        self._worker: PipelineWorker | None = None
+        self._rubber_band: QRubberBand | None = None
+        self._drag_origin = QPoint()
+        self._build_ui()
 
-        self.setStyleSheet(f"background:{BG};")
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_state(self, state):
+        self._state = state
+
+    def set_image(self, array: np.ndarray):
+        self._current_image = array.copy()
+        self._view_mode = 'after'
+        self._update_view_buttons()
+        self._refresh_domain_display()
+        self._update_zoom_label()
+        self._update_info_strip()
+
+    def store_before(self, image: np.ndarray):
+        self._before_image = image.copy()
+
+    def clear_roi(self, emit_signal: bool = True):
+        if self._rubber_band is not None:
+            self._rubber_band.hide()
+            self._rubber_band = None
+        self._roi_overlay.set_rect(None)
+        if emit_signal:
+            self.roi_cleared.emit()
+
+    def set_interp(self, mode: str):
+        if mode not in ('nearest', 'bilinear'):
+            return
+        self._interp = mode
+        self._update_interp_btn()
+        self._refresh_domain_display()
+
+    def theme_changed(self, palette: dict):
+        self._apply_theme()
+        self._on_domain_toggled(self._domain_btn.isChecked())
+
+    # ------------------------------------------------------------------
+    # Keep-alive
+    # ------------------------------------------------------------------
+
+    def _keep_alive(self, worker: PipelineWorker):
+        self._workers.append(worker)
+        worker.finished.connect(
+            lambda *_: self._workers.remove(worker) if worker in self._workers else None
+        )
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         # ---- toolbar ----
-        toolbar = QWidget()
-        toolbar.setFixedHeight(32)
-        toolbar.setStyleSheet(f"background:{PANEL};border-bottom:1px solid {BORDER};")
-        tl = QHBoxLayout(toolbar)
-        tl.setContentsMargins(6, 2, 6, 2)
-        tl.setSpacing(4)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(4, 4, 4, 4)
+        bar.setSpacing(4)
 
-        self._btn_zout = QPushButton("−")
-        self._btn_zout.setFixedSize(24, 24)
-        self._btn_zout.setStyleSheet(btn_style('ghost'))
-        self._btn_zout.clicked.connect(self.zoom_out)
-        tl.addWidget(self._btn_zout)
+        self._zoom_minus = QPushButton("−")
+        self._zoom_minus.setFixedSize(24, 24)
+        self._zoom_minus.clicked.connect(self._zoom_out)
 
         self._zoom_label = QLabel("100%")
-        self._zoom_label.setFixedWidth(36)
+        self._zoom_label.setFixedWidth(40)
         self._zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._zoom_label.setStyleSheet(f"color:{MUTED};font-size:9px;")
-        tl.addWidget(self._zoom_label)
 
-        self._btn_zin = QPushButton("+")
-        self._btn_zin.setFixedSize(24, 24)
-        self._btn_zin.setStyleSheet(btn_style('ghost'))
-        self._btn_zin.clicked.connect(self.zoom_in)
-        tl.addWidget(self._btn_zin)
+        self._zoom_plus = QPushButton("+")
+        self._zoom_plus.setFixedSize(24, 24)
+        self._zoom_plus.clicked.connect(self._zoom_in)
 
-        self._btn_fit = QPushButton("Fit")
-        self._btn_fit.setFixedHeight(24)
-        self._btn_fit.setStyleSheet(btn_style('ghost'))
-        self._btn_fit.clicked.connect(self.fit_to_window)
-        tl.addWidget(self._btn_fit)
+        self._fit_btn = QPushButton("Fit")
+        self._fit_btn.setFixedHeight(24)
+        self._fit_btn.clicked.connect(self._fit_zoom)
 
-        tl.addWidget(_sep())
+        bar.addWidget(self._zoom_minus)
+        bar.addWidget(self._zoom_label)
+        bar.addWidget(self._zoom_plus)
+        bar.addWidget(self._fit_btn)
+        bar.addWidget(self._make_sep())
 
-        self._btn_interp = QPushButton("NN")
-        self._btn_interp.setFixedHeight(24)
-        self._btn_interp.setStyleSheet(btn_style())
-        self._btn_interp.clicked.connect(self._toggle_interp)
-        tl.addWidget(self._btn_interp)
+        self._interp_btn = QPushButton("NN")
+        self._interp_btn.setCheckable(True)
+        self._interp_btn.setChecked(False)
+        self._interp_btn.setFixedWidth(36)
+        self._interp_btn.clicked.connect(self._on_interp_toggled)
+        bar.addWidget(self._interp_btn)
+        bar.addWidget(self._make_sep())
 
-        tl.addWidget(_sep())
+        self._before_btn = QPushButton("BEFORE")
+        self._before_btn.setFixedHeight(26)
+        self._before_btn.clicked.connect(self._on_before_clicked)
 
-        # ── Before / After toggle ──
-        self._after_btn = QPushButton("After")
-        self._after_btn.setCheckable(True)
-        self._after_btn.setChecked(True)
-        self._after_btn.setFixedHeight(24)
-        self._after_btn.clicked.connect(lambda: self._set_view_mode('after'))
-        self._after_btn.setStyleSheet("""
-            QPushButton {
-                background: #1a2208;
-                color: #c8f135;
-                border: 1px solid #6a8a10;
-                border-right: none;
-                border-radius: 2px 0 0 2px;
-                font-family: 'JetBrains Mono', Consolas, monospace;
-                font-size: 9px;
-                font-weight: bold;
-                padding: 0 10px;
-                letter-spacing: 1px;
-            }
-            QPushButton:!checked {
-                background: #252623;
-                color: #6b6f65;
-                border: 1px solid #353730;
-                border-right: none;
-            }
-        """)
-        tl.addWidget(self._after_btn)
+        self._after_btn = QPushButton("AFTER")
+        self._after_btn.setFixedHeight(26)
+        self._after_btn.clicked.connect(self._on_after_clicked)
 
-        self._before_btn = QPushButton("Before")
-        self._before_btn.setCheckable(True)
-        self._before_btn.setChecked(False)
-        self._before_btn.setFixedHeight(24)
-        self._before_btn.clicked.connect(lambda: self._set_view_mode('before'))
-        self._before_btn.setStyleSheet("""
-            QPushButton {
-                background: #252623;
-                color: #6b6f65;
-                border: 1px solid #353730;
-                border-radius: 0 2px 2px 0;
-                font-family: 'JetBrains Mono', Consolas, monospace;
-                font-size: 9px;
-                font-weight: bold;
-                padding: 0 10px;
-                letter-spacing: 1px;
-            }
-            QPushButton:checked {
-                background: #1a2208;
-                color: #c8f135;
-                border: 1px solid #6a8a10;
-            }
-        """)
-        tl.addWidget(self._before_btn)
+        bar.addWidget(self._before_btn)
+        bar.addWidget(self._after_btn)
+        bar.addWidget(self._make_sep())
 
-        tl.addStretch()
+        self._domain_btn = QPushButton("SPATIAL")
+        self._domain_btn.setCheckable(True)
+        self._domain_btn.setChecked(False)
+        self._domain_btn.setFixedSize(64, 26)
+        self._domain_btn.clicked.connect(self._on_domain_toggled)
+        bar.addWidget(self._domain_btn)
 
-        self._coord_label = QLabel("x:—  y:—")
-        self._coord_label.setStyleSheet(f"color:{MUTED2};font-size:9px;")
-        tl.addWidget(self._coord_label)
+        bar.addStretch()
+        layout.addLayout(bar)
 
-        layout.addWidget(toolbar)
+        # ---- progress strip (2px, animated) ----
+        self.progress_strip = ProgressStrip(self)
+        layout.addWidget(self.progress_strip)
 
-        # ---- scroll area ----
+        # ---- image scroll area ----
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._scroll.setStyleSheet(f"QScrollArea{{background:{BG};border:none;}}")
-        self._scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        self._img_label = _ImageLabel()
-        self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._img_label.setStyleSheet(f"background:{BG};color:{MUTED};font-size:11px;")
-        self._img_label.setText("No image loaded")
-        self._img_label.setMinimumSize(1, 1)
-        self._img_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._scroll.setWidget(self._img_label)
-        layout.addWidget(self._scroll)
+        self._label = QLabel()
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._label.setScaledContents(False)
+        self._scroll.setWidget(self._label)
+        layout.addWidget(self._scroll, stretch=1)
 
-        # rubber band on viewport
-        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self._scroll.viewport())
-        self._scroll.viewport().installEventFilter(self)
-        self._scroll.viewport().setMouseTracking(True)
+        # marching-ants ROI overlay (child of label, transparent to mouse)
+        self._roi_overlay = RoiOverlay(self._label)
+        self._roi_overlay.resize(self._label.size())
 
-        # processing overlay
-        self._overlay = QLabel("PROCESSING…", self._scroll.viewport())
-        self._overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._overlay.setStyleSheet(
-            f"background:rgba(17,18,16,210);color:{ACCENT};font-size:13px;font-weight:bold;"
+        # crossfade opacity effect on the image label
+        self._opacity_eff = QGraphicsOpacityEffect(self._label)
+        self._opacity_eff.setOpacity(1.0)
+        self._label.setGraphicsEffect(self._opacity_eff)
+
+        # ---- bottom info strip (24px) ----
+        info_strip = QWidget()
+        info_strip.setFixedHeight(24)
+        info_lyt = QHBoxLayout(info_strip)
+        info_lyt.setContentsMargins(8, 0, 8, 0)
+        info_lyt.setSpacing(0)
+
+        self._coord_lbl = QLabel("")
+        self._coord_lbl.setFixedWidth(180)
+        info_lyt.addWidget(self._coord_lbl)
+
+        info_lyt.addStretch()
+
+        self._before_badge_lbl = QLabel("BEFORE")
+        self._before_badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._before_badge_lbl.setFixedWidth(60)
+        self._before_badge_lbl.hide()
+        info_lyt.addWidget(self._before_badge_lbl)
+
+        info_lyt.addStretch()
+
+        self._zoom_dim_lbl = QLabel("")
+        self._zoom_dim_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self._overlay.hide()
+        info_lyt.addWidget(self._zoom_dim_lbl)
 
-        # before badge overlay
-        self._before_badge = QLabel("◀ BEFORE", self._img_label)
-        self._before_badge.setStyleSheet("""
-            QLabel {
-                background: rgba(200, 241, 53, 220);
-                color: #0d1002;
-                font-family: 'JetBrains Mono', Consolas, monospace;
-                font-size: 10px;
-                font-weight: bold;
-                letter-spacing: 2px;
-                padding: 3px 10px;
-                border-radius: 2px;
-            }
-        """)
-        self._before_badge.adjustSize()
-        self._before_badge.move(10, 10)
-        self._before_badge.hide()
-        self._before_badge.raise_()
+        self._info_strip = info_strip
+        layout.addWidget(info_strip)
 
-    # ------------------------------------------------------------------ public API
+        self._label.installEventFilter(self)
+        self._scroll.viewport().installEventFilter(self)
 
-    def set_image(self, image: np.ndarray, fit_to_window: bool = False):
-        if image is None or not isinstance(image, np.ndarray):
-            return
-        img = image.copy()
-        if img.ndim == 3:
-            img = np.mean(img, axis=2).astype(np.uint8)
-        self._image = normalize_to_uint8(img)
+        sc = QShortcut(QKeySequence("B"), self)
+        sc.activated.connect(self._toggle_before)
 
-        self._display_image = self._image
+        self._apply_theme()
 
-        # Reset before/after state to "after"
-        self._showing_before = False
-        self._fit_to_window = fit_to_window
-        self._after_btn.setChecked(True)
-        self._before_btn.setChecked(False)
-        self._before_badge.hide()
+    def _make_sep(self) -> QLabel:
+        p = _get_theme()
+        lbl = QLabel("|")
+        lbl.setStyleSheet(
+            f"QLabel {{ color: {p['BORDER2']}; font-size: 10px; padding: 0 2px; }}"
+        )
+        return lbl
 
-        if fit_to_window:
-            # Wait one event loop so the scroll viewport has its final size.
-            QTimer.singleShot(0, self.fit_to_window)
+    def _apply_theme(self):
+        p = _get_theme()
+        self._scroll.setStyleSheet(
+            f"QScrollArea {{ background: {p['BG']}; border: none; }}"
+        )
+        self._label.setStyleSheet(f"QLabel {{ background: {p['BG']}; }}")
+        self._zoom_label.setStyleSheet(
+            f"QLabel {{ color: {p['MUTED']}; "
+            f"font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px; }}"
+        )
+        icon_ss = (
+            f"QPushButton {{ background: {p['INPUT']}; color: {p['TEXT']};"
+            f" border: 1px solid {p['BORDER2']}; border-radius: 2px;"
+            f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11px;"
+            f" font-weight: bold; }}"
+            f"QPushButton:hover {{ background: {p['PANEL2']}; }}"
+        )
+        for btn in (self._zoom_minus, self._zoom_plus, self._fit_btn):
+            btn.setStyleSheet(icon_ss)
+        self._coord_lbl.setStyleSheet(
+            f"QLabel {{ color: {p['MUTED']}; background: transparent; "
+            f"font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px; }}"
+        )
+        self._before_badge_lbl.setStyleSheet(
+            f"QLabel {{ color: {p['DARK']}; background: {p['AMBER']}; "
+            f"font-family: 'JetBrains Mono', Consolas, monospace; font-size: 8px; "
+            f"font-weight: bold; border-radius: 2px; padding: 1px 4px; }}"
+        )
+        self._zoom_dim_lbl.setStyleSheet(
+            f"QLabel {{ color: {p['MUTED']}; background: transparent; "
+            f"font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px; }}"
+        )
+        self._info_strip.setStyleSheet(f"background: {p['PANEL']};")
+        self._update_interp_btn()
+        self._update_view_buttons()
+        self._on_domain_toggled(self._domain_btn.isChecked())
+
+    def _update_interp_btn(self):
+        p = _get_theme()
+        checked = self._interp == 'bilinear'
+        self._interp_btn.setChecked(checked)
+        self._interp_btn.setText("BL" if checked else "NN")
+        if checked:
+            self._interp_btn.setStyleSheet(
+                f"QPushButton {{ background: {p['ACCENT']}; color: {p['DARK']};"
+                f" border: 1px solid {p['ACCENT']}; border-radius: 2px;"
+                f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px;"
+                f" font-weight: bold; }}"
+            )
         else:
-            self._render()
+            self._interp_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {p['ACCENT']};"
+                f" border: 1px solid {p['ACCENT']}; border-radius: 2px;"
+                f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px;"
+                f" font-weight: bold; }}"
+                f"QPushButton:hover {{ background: {p['PANEL2']}; }}"
+            )
 
-    def set_before_image(self, image: np.ndarray):
-        """Store the before/original image for before-after comparison."""
-        if image is None or not isinstance(image, np.ndarray):
+    def _update_view_buttons(self):
+        p = _get_theme()
+        active_ss = (
+            f"QPushButton {{ background: {p['ACCENT']}; color: {p['DARK']};"
+            f" border: 1px solid {p['ACCENT']}; border-radius: 2px;"
+            f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px;"
+            f" font-weight: bold; padding: 2px 8px; }}"
+        )
+        inactive_ss = (
+            f"QPushButton {{ background: transparent; color: {p['ACCENT']};"
+            f" border: 1px solid {p['ACCENT']}; border-radius: 2px;"
+            f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 9px;"
+            f" font-weight: bold; padding: 2px 8px; }}"
+            f"QPushButton:hover {{ background: {p['PANEL2']}; }}"
+        )
+        if self._view_mode == 'before':
+            self._before_btn.setStyleSheet(active_ss)
+            self._after_btn.setStyleSheet(inactive_ss)
+            self._before_badge_lbl.show()
+        else:
+            self._before_btn.setStyleSheet(inactive_ss)
+            self._after_btn.setStyleSheet(active_ss)
+            self._before_badge_lbl.hide()
+
+    def _update_zoom_label(self):
+        self._zoom_label.setText(f"{int(self._zoom * 100)}%")
+
+    def _update_info_strip(self):
+        if self._current_image is None:
+            self._zoom_dim_lbl.setText("")
             return
-        img = image.copy()
-        if img.ndim == 3:
-            img = np.mean(img, axis=2).astype(np.uint8)
-        if img.dtype != np.uint8:
-            mn, mx = float(img.min()), float(img.max())
-            if mx > mn:
-                img = ((img.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
+        h, w = self._current_image.shape[:2]
+        pct = int(self._zoom * 100)
+        self._zoom_dim_lbl.setText(f"{pct}%  {w}×{h}")
+
+    # ------------------------------------------------------------------
+    # Domain display
+    # ------------------------------------------------------------------
+
+    def _refresh_domain_display(self, crossfade: bool = False):
+        if self._current_image is None:
+            return
+        source = (
+            self._before_image
+            if self._view_mode == 'before' and self._before_image is not None
+            else self._current_image
+        )
+        if self._freq_mode:
+            def _spec(image):
+                from processing.frequency.spectrum import compute_spectrum, spectrum_to_display
+                from utils.image_utils import to_grayscale
+                gray = to_grayscale(image) if image.ndim == 3 else image
+                shifted_fft, _, _ = compute_spectrum(gray)
+                return spectrum_to_display(shifted_fft)
+
+            state = _ArrayState(source)
+            w = PipelineWorker(fn=_spec, op_name='_domain_preview', state=state)
+            w.finished.connect(
+                lambda _n, arr: self._render_array(arr, crossfade=crossfade)
+            )
+            w.error.connect(lambda _e: None)
+            w.start()
+            self._keep_alive(w)
+        else:
+            self._render_array(source, crossfade=crossfade)
+
+    def _render_array(self, array: np.ndarray, crossfade: bool = False):
+        pix = to_qpixmap(array)
+        if self._zoom != 1.0:
+            w = max(1, int(pix.width() * self._zoom))
+            h = max(1, int(pix.height() * self._zoom))
+            mode = (
+                Qt.TransformationMode.SmoothTransformation
+                if self._interp == 'bilinear'
+                else Qt.TransformationMode.FastTransformation
+            )
+            pix = pix.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, mode)
+        if crossfade:
+            self._crossfade_to(pix)
+        else:
+            self._label.setPixmap(pix)
+            self._label.resize(pix.size())
+            self._roi_overlay.resize(pix.size())
+
+    def _crossfade_to(self, pix: QPixmap):
+        fade_out = QPropertyAnimation(self._opacity_eff, b"opacity", self)
+        fade_out.setDuration(150)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+
+        def _swap():
+            self._label.setPixmap(pix)
+            self._label.resize(pix.size())
+            self._roi_overlay.resize(pix.size())
+            fade_in = QPropertyAnimation(self._opacity_eff, b"opacity", self)
+            fade_in.setDuration(150)
+            fade_in.setStartValue(0.0)
+            fade_in.setEndValue(1.0)
+            fade_in.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+        fade_out.finished.connect(_swap)
+        fade_out.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _redraw(self):
+        if self._current_image is None:
+            return
+        source = (
+            self._before_image
+            if self._view_mode == 'before' and self._before_image is not None
+            else self._current_image
+        )
+        self._render_array(source)
+
+    # ------------------------------------------------------------------
+    # Toggle handlers
+    # ------------------------------------------------------------------
+
+    def _on_before_clicked(self):
+        self._view_mode = 'before'
+        self._update_view_buttons()
+        self._refresh_domain_display(crossfade=True)
+
+    def _on_after_clicked(self):
+        self._view_mode = 'after'
+        self._update_view_buttons()
+        self._refresh_domain_display(crossfade=True)
+
+    def _toggle_before(self):
+        if self._view_mode == 'before':
+            self._on_after_clicked()
+        else:
+            self._on_before_clicked()
+
+    def _on_interp_toggled(self, checked: bool):
+        self._interp = 'bilinear' if checked else 'nearest'
+        self._update_interp_btn()
+        self.interp_changed.emit(self._interp)
+        self._refresh_domain_display()
+
+    def _on_domain_toggled(self, checked: bool):
+        self._freq_mode = checked
+        p = _get_theme()
+        if checked:
+            self._domain_btn.setText('FREQ')
+            self._domain_btn.setStyleSheet(
+                f"QPushButton {{ background: {p['ACCENT']}; color: {p['DARK']};"
+                f" border: 1px solid {p['ACCENT']}; border-radius: 3px;"
+                f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px;"
+                f" font-weight: bold; padding: 2px 4px; }}"
+            )
+        else:
+            self._domain_btn.setText('SPATIAL')
+            self._domain_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {p['ACCENT']};"
+                f" border: 1px solid {p['ACCENT']}; border-radius: 3px;"
+                f" font-family: 'JetBrains Mono', Consolas, monospace; font-size: 10px;"
+                f" font-weight: bold; padding: 2px 4px; }}"
+                f"QPushButton:hover {{ background: {p['PANEL2']}; }}"
+            )
+        self._refresh_domain_display()
+
+    # ------------------------------------------------------------------
+    # Zoom controls
+    # ------------------------------------------------------------------
+
+    def _zoom_in(self):
+        self._zoom = min(8.0, self._zoom * 1.2)
+        self._update_zoom_label()
+        self._update_info_strip()
+        self._redraw()
+
+    def _zoom_out(self):
+        self._zoom = max(0.05, self._zoom / 1.2)
+        self._update_zoom_label()
+        self._update_info_strip()
+        self._redraw()
+
+    def _fit_zoom(self):
+        if self._current_image is None:
+            return
+        h, w = self._current_image.shape[:2]
+        vp = self._scroll.viewport()
+        vw, vh = max(1, vp.width()), max(1, vp.height())
+        self._zoom = max(0.05, min(8.0, min(vw / w, vh / h)))
+        self._update_zoom_label()
+        self._update_info_strip()
+        self._redraw()
+
+    # ------------------------------------------------------------------
+    # Mouse coord tracking
+    # ------------------------------------------------------------------
+
+    def _update_coord_display(self, label_pos: QPoint):
+        if self._current_image is None:
+            self._coord_lbl.setText("")
+            return
+        pix = self._label.pixmap()
+        if pix is None:
+            self._coord_lbl.setText("")
+            return
+        lw, lh = self._label.width(), self._label.height()
+        pw, ph = pix.width(), pix.height()
+        ox = (lw - pw) // 2
+        oy = (lh - ph) // 2
+        img_x = int((label_pos.x() - ox) / self._zoom)
+        img_y = int((label_pos.y() - oy) / self._zoom)
+        h, w = self._current_image.shape[:2]
+        if 0 <= img_x < w and 0 <= img_y < h:
+            img = self._current_image
+            if img.ndim == 3:
+                intensity = int(
+                    0.299 * img[img_y, img_x, 0]
+                    + 0.587 * img[img_y, img_x, 1]
+                    + 0.114 * img[img_y, img_x, 2]
+                )
             else:
-                img = np.zeros_like(img, dtype=np.uint8)
-        self._before_image = img
-
-    def zoom_in(self):
-        self._set_zoom(self._zoom + 10, fit_mode=False)
-
-    def zoom_out(self):
-        self._set_zoom(self._zoom - 10, fit_mode=False)
-
-    def zoom_fit(self):
-        self.fit_to_window()
-
-    def fit_to_window(self):
-        base = self._get_display_base()
-        if base is None:
-            return
-        self._fit_to_window = True
-        self._set_zoom(self._compute_fit_zoom(base), fit_mode=True)
-
-    def set_interpolation_mode(self, mode: str):
-        if mode in ('nearest', 'bilinear'):
-            self._interp_mode = mode
-            self._render()
-
-    def get_roi(self) -> QRect | None:
-        return self._roi
-
-    def show_processing_overlay(self, visible: bool):
-        if visible:
-            vp = self._scroll.viewport()
-            self._overlay.setGeometry(0, 0, vp.width(), vp.height())
-            self._overlay.raise_()
-            self._overlay.show()
+                intensity = int(img[img_y, img_x])
+            self._coord_lbl.setText(f"X: {img_x}  Y: {img_y}  I: {intensity}")
         else:
-            self._overlay.hide()
+            self._coord_lbl.setText("")
 
-    def toggle_before_after(self):
-        """Toggle between before and after — bound to B shortcut."""
-        if self._showing_before:
-            self._set_view_mode('after')
-        else:
-            self._set_view_mode('before')
-
-    # ------------------------------------------------------------------ events
+    # ------------------------------------------------------------------
+    # Event filter: wheel zoom + rubber-band ROI + coord tracking
+    # ------------------------------------------------------------------
 
     def eventFilter(self, obj, event):
-        if obj is self._scroll.viewport():
+        if obj is self._label:
             t = event.type()
-            if t == QEvent.Type.MouseButtonPress:
-                self.mousePressEvent(event)
-            elif t == QEvent.Type.MouseMove:
-                self.mouseMoveEvent(event)
-            elif t == QEvent.Type.MouseButtonRelease:
-                self.mouseReleaseEvent(event)
+            if t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._drag_origin = event.pos()
+                self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self._label)
+                self._rubber_band.setGeometry(QRect(self._drag_origin, QSize()))
+                self._rubber_band.show()
+                self._roi_overlay.set_rect(None)
+                return True
+            if t == QEvent.Type.MouseMove:
+                self._update_coord_display(event.pos())
+                if self._rubber_band is not None:
+                    self._rubber_band.setGeometry(
+                        QRect(self._drag_origin, event.pos()).normalized()
+                    )
+                return True
+            if t == QEvent.Type.MouseButtonRelease and self._rubber_band is not None:
+                rect = QRect(self._drag_origin, event.pos()).normalized()
+                self._rubber_band.hide()
+                self._rubber_band = None
+                if rect.width() >= 4 and rect.height() >= 4:
+                    self._roi_overlay.set_rect(rect)
+                self._emit_roi(rect)
+                return True
+            if t == QEvent.Type.Leave:
+                self._coord_lbl.setText("")
+                return False
+        if obj is self._scroll.viewport():
+            if event.type() == QEvent.Type.Wheel:
+                self._on_wheel_zoom(event.angleDelta().y())
+                return True
         return super().eventFilter(obj, event)
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self._fit_to_window and self._image is not None:
-            QTimer.singleShot(0, self.fit_to_window)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._origin = event.position().toPoint()
-            self._rubber_band.setGeometry(QRect(self._origin, QSize()))
-            self._rubber_band.show()
-
-    def mouseMoveEvent(self, event):
-        pos = event.position().toPoint()
-        if not self._origin.isNull():
-            self._rubber_band.setGeometry(QRect(self._origin, pos).normalized())
-        ix, iy = self._viewport_to_image(pos)
-        self._coord_label.setText(f"x:{ix}  y:{iy}")
-        self.coords_changed.emit(ix, iy)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and not self._origin.isNull():
-            end = event.position().toPoint()
-            vp_rect = QRect(self._origin, end).normalized()
-            self._rubber_band.hide()
-            self._origin = QPoint()
-            self._roi = self._viewport_rect_to_image_rect(vp_rect)
-            try:
-                self.roi_selected.emit(self._roi)
-            except Exception as e:
-                import logging
-                logging.getLogger('ciaw').error(f"ROI selection error: {e}")
-
-    # ------------------------------------------------------------------ private
-
-    def _render_sync(self):
-        """Synchronous render — always shows image immediately on the main thread."""
-        base = self._get_display_base()
-        if base is None:
+    def _emit_roi(self, widget_rect: QRect):
+        if self._current_image is None or widget_rect.width() < 2 or widget_rect.height() < 2:
             return
-        self._display_array(base)
-
-    def _render(self):
-        base = self._get_display_base()
-        if base is None:
+        pix = self._label.pixmap()
+        if pix is None:
             return
-
-        if self._zoom == 100:
-            self._render_sync()
+        height, width = self._current_image.shape[:2]
+        lw, lh = self._label.width(), self._label.height()
+        pw, ph = pix.width(), pix.height()
+        ox = (lw - pw) // 2
+        oy = (lh - ph) // 2
+        x0 = int((widget_rect.x() - ox) / self._zoom)
+        y0 = int((widget_rect.y() - oy) / self._zoom)
+        x1 = int((widget_rect.x() + widget_rect.width() - ox) / self._zoom)
+        y1 = int((widget_rect.y() + widget_rect.height() - oy) / self._zoom)
+        x0 = max(0, min(x0, width))
+        y0 = max(0, min(y0, height))
+        x1 = max(0, min(x1, width))
+        y1 = max(0, min(y1, height))
+        x = min(x0, x1)
+        y = min(y0, y1)
+        w = abs(x1 - x0)
+        h = abs(y1 - y0)
+        if w <= 0 or h <= 0:
             return
+        self.roi_selected.emit(x, y, w, h)
 
-        zoom_factor = self._zoom / 100.0
-        h, w = base.shape[:2]
-        new_h = max(1, int(round(h * zoom_factor)))
-        new_w = max(1, int(round(w * zoom_factor)))
-        _img = base.copy()
-        _mode = self._interp_mode
+    # ------------------------------------------------------------------
+    # Wheel zoom
+    # ------------------------------------------------------------------
 
-        def _zoom_fn():
-            if _mode == 'nearest':
-                from processing.interpolation import nearest_neighbor_resize
-                result = nearest_neighbor_resize(_img, new_h, new_w)
-                return result if result is not None else _img
-            else:
-                from processing.interpolation import bilinear_resize
-                result = bilinear_resize(_img, new_h, new_w)
-                if result is None:
-                    from processing.interpolation import nearest_neighbor_resize
-                    return nearest_neighbor_resize(_img, new_h, new_w)
-                mn, mx = float(result.min()), float(result.max())
-                if mx > mn:
-                    return ((result.astype(np.float64) - mn) / (mx - mn) * 255).astype(np.uint8)
-                return np.zeros((new_h, new_w), dtype=np.uint8)
-
-        requested_zoom = self._zoom
-        self._zoom_worker = ZoomWorker(_zoom_fn, parent=self)
-        self._zoom_worker.finished.connect(
-            lambda result, zoom=requested_zoom: self._display_array(result)
-            if zoom == self._zoom else None
-        )
-        self._zoom_worker.error.connect(
-            lambda e: logging.getLogger('ciaw').error(f"Zoom error: {e}")
-        )
-        self._zoom_worker.start()
-
-    def _display_array(self, display_image):
-        """Update label with image array. Must run on main thread."""
-        if display_image is None or display_image.size == 0:
+    def _on_wheel_zoom(self, delta: int):
+        if self._current_image is None:
             return
-        data = normalize_to_uint8(display_image)
-        pixmap = to_qpixmap(data)
-        if pixmap.isNull():
-            return
-        self._img_label.setPixmap(pixmap)
-        self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._img_label.setFixedSize(pixmap.size())
-        self._img_label.updateGeometry()
-        self._zoom_label.setText(f"{self._zoom}%")
-        self.zoom_changed.emit(self._zoom)
-
-    def _set_view_mode(self, mode: str):
-        """Switch display between before and after."""
-        if mode == 'before':
-            if self._before_image is None:
+        factor = 1.1 if delta > 0 else 0.9
+        self._zoom = max(0.1, min(8.0, self._zoom * factor))
+        self._update_zoom_label()
+        self._update_info_strip()
+        if not self._freq_mode:
+            self._redraw()
+            if self._worker and self._worker.isRunning():
                 return
-            self._showing_before = True
-            self._after_btn.setChecked(False)
-            self._before_btn.setChecked(True)
-            self._render()
-            self._before_badge.show()
-            self._before_badge.raise_()
-        else:
-            self._showing_before = False
-            self._after_btn.setChecked(True)
-            self._before_btn.setChecked(False)
-            self._before_badge.hide()
-            if self._image is not None:
-                self._render()
+            source = (
+                self._before_image
+                if self._view_mode == 'before' and self._before_image is not None
+                else self._current_image
+            )
+            state = _ArrayState(source)
+            self._worker = PipelineWorker(
+                apply_zoom, "zoom", state,
+                zoom_factor=self._zoom, mode=self._interp,
+            )
+            self._worker.finished.connect(self._on_zoom_done)
+            self._worker.error.connect(lambda _e: None)
+            self._worker.start()
 
-    def _set_zoom(self, zoom_percent: int, fit_mode: bool = False):
-        self._fit_to_window = fit_mode
-        self._zoom = max(self._MIN_ZOOM, min(int(zoom_percent), self._MAX_ZOOM))
-        self._render()
-
-    def _compute_fit_zoom(self, image: np.ndarray) -> int:
-        h, w = image.shape[:2]
-        if h <= 0 or w <= 0:
-            return 100
-
-        viewport = self._scroll.viewport().size()
-        view_w = max(1, viewport.width() - 2)
-        view_h = max(1, viewport.height() - 2)
-
-        scale = min(view_w / w, view_h / h)
-        zoom = int(scale * 100)
-        return max(self._MIN_ZOOM, min(zoom, self._MAX_ZOOM))
-
-    def _get_display_base(self) -> np.ndarray | None:
-        if self._showing_before and self._before_image is not None:
-            return self._before_image
-        return self._display_image if self._display_image is not None else self._image
-
-    def _viewport_to_image(self, point: QPoint) -> tuple:
-        if self._image is None:
-            return 0, 0
-        label_pos = self._img_label.mapFrom(self._scroll.viewport(), point)
-        zoom_factor = self._zoom / 100.0
-        ix = int(label_pos.x() / zoom_factor)
-        iy = int(label_pos.y() / zoom_factor)
-        h, w = self._image.shape[:2]
-        return max(0, min(ix, w - 1)), max(0, min(iy, h - 1))
-
-    def _viewport_rect_to_image_rect(self, vp_rect: QRect) -> QRect:
-        x1, y1 = self._viewport_to_image(vp_rect.topLeft())
-        x2, y2 = self._viewport_to_image(vp_rect.bottomRight())
-        return QRect(QPoint(x1, y1), QPoint(x2, y2)).normalized()
-
-    def _toggle_interp(self):
-        if self._interp_mode == 'nearest':
-            self.set_interpolation_mode('bilinear')
-            self._btn_interp.setText("BL")
-            self.interp_changed.emit('BL')
-        else:
-            self.set_interpolation_mode('nearest')
-            self._btn_interp.setText("NN")
-            self.interp_changed.emit('NN')
-
+    def _on_zoom_done(self, _op_name: str, result: np.ndarray):
+        pix = to_qpixmap(result)
+        self._label.setPixmap(pix)
+        self._label.resize(pix.size())
+        self._roi_overlay.resize(pix.size())

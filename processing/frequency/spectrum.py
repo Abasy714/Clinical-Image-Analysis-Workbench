@@ -7,9 +7,15 @@ import numpy as np
 from utils.image_utils import validate_grayscale, normalize_to_uint8
 from utils.error_handler import wrap_errors
 
+_cache: dict = {'image_id': None, 'result': None}
+
 
 @wrap_errors
 def compute_spectrum(image: np.ndarray) -> tuple:
+    global _cache
+    img_id = id(image)
+    if _cache['image_id'] == img_id and _cache['result'] is not None:
+        return _cache['result']
     validate_grayscale(image)
     base = image.astype(np.float64)
     #apply 2D FFT to convert the image from spatial domain to frequency domain
@@ -18,7 +24,9 @@ def compute_spectrum(image: np.ndarray) -> tuple:
     log_magnitude = np.log1p(np.abs(shifted_fft))   #The log scaling compresses the huge dynamic range, 1+ is used to avoid log(0) which would be -inf
     phase         = np.angle(shifted_fft)   #phase is the angle of the complex numbers in the shifted FFT, The magnitude and phase together fully describe the frequency content of the image.
 
-    return shifted_fft, log_magnitude, phase
+    result = shifted_fft, log_magnitude, phase
+    _cache = {'image_id': img_id, 'result': result}
+    return result
 
 #The following functions take the shifted FFT and convert it to displayable images.
 @wrap_errors

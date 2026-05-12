@@ -114,8 +114,15 @@ def local_histogram_equalization(image: np.ndarray, block_size: int, clip_limit:
             block = image[row_start : row_start + block_size, col_start : col_start + block_size]
             luts[ty, tx] = _compute_tile_lut(block, clip_limit=clip_limit) #Computes the clipped equalized LUT for this tile and stores it.
 
-    tile_centers_y = (np.arange(n_tiles_y, dtype=np.float64) + 0.5) * block_size
-    tile_centers_x = (np.arange(n_tiles_x, dtype=np.float64) + 0.5) * block_size
+    if n_tiles_y == 1:
+        luts = np.repeat(luts, 2, axis=0)
+        n_tiles_y = 2
+    if n_tiles_x == 1:
+        luts = np.repeat(luts, 2, axis=1)
+        n_tiles_x = 2
+
+    tile_centers_y = np.linspace(0, height - 1, n_tiles_y, dtype=np.float64)
+    tile_centers_x = np.linspace(0, width - 1, n_tiles_x, dtype=np.float64)
 
     output = _interpolate_luts(image, luts, tile_centers_y, tile_centers_x)
 

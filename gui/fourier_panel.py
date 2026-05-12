@@ -1,258 +1,565 @@
-# STATUS: IMPLEMENTED
-"""
-Frequency domain panel for periodic noise removal via interactive notch filtering.
-Displays the log-scaled FFT magnitude spectrum and allows the user to click on noise spikes.
-"""
-
 import numpy as np
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                              QLabel, QSpinBox, QButtonGroup, QRadioButton,
-                              QFrame, QSizePolicy)
-from PyQt6.QtCore import pyqtSignal, Qt
-from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QImage
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QSpinBox, QDoubleSpinBox, QTabWidget, QSizePolicy, QButtonGroup, QGridLayout,
+)
+from PyQt6.QtCore import Qt, pyqtSignal
 
-from gui.styles import (BG, PANEL, PANEL2, INPUT, BORDER, BORDER2,
-                        ACCENT, RED, TEXT, MUTED, MUTED2, btn_style,
-                        HEADER_SS, FIELD_SS, APPLY_BTN_SS, SPINBOX_SS)
-from utils import (validate_grayscale, normalize_to_uint8, to_qpixmap, wrap_errors, show_error_dialog,)
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+from gui.theme import get as _get_theme
+from gui.styles import btn_style, operation_btn_style, SPINBOX_SS, APPLY_BTN_SS, HEADER_SS, FIELD_SS
+from gui.workers import PipelineWorker
 
 
-class SpectrumCanvas(QWidget):
-    """Custom canvas showing FFT spectrum with clickable notch placement."""
+# ------------------------------------------------------------------
+# Minimal state adapter for canvas workers with a fixed image
+# ------------------------------------------------------------------
 
-    clicked_at = pyqtSignal(int, int)
+class _StaticState:
+    def __init__(self, img: np.ndarray):
+        self._img = img
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._spectrum_pixmap: QPixmap | None = None
-        self._notches: list = []
-        self._spectrum_shape: tuple = (1, 1)
-        self.setFixedHeight(200)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setStyleSheet(f"background:{BG};border:1px solid {BORDER};border-radius:2px;")
-        self.setCursor(Qt.CursorShape.CrossCursor)
+    def get_base_image(self) -> np.ndarray:
+        return self._img
 
-    def set_spectrum(self, log_magnitude: np.ndarray):
-        self._spectrum_shape = log_magnitude.shape
-        data = normalize_to_uint8(log_magnitude)
-        self._spectrum_pixmap = to_qpixmap(data)
-        self.update()
 
-    def set_notches(self, notches: list):
-        self._notches = notches
-        self.update()
+# ------------------------------------------------------------------
+# Module-level worker functions (never called on main thread)
+# ------------------------------------------------------------------
 
-    def clear_notches(self):
-        self._notches = []
-        self.update()
+def _to_gray(image: np.ndarray) -> np.ndarray:
+    if image.ndim == 3:
+        return (0.299 * image[:, :, 0] + 0.587 * image[:, :, 1]
+                + 0.114 * image[:, :, 2]).astype(np.uint8)
+    return image
 
-    def mousePressEvent(self, event):
-        if self._spectrum_pixmap is None:
-            return
-        h_sp, w_sp = self._spectrum_shape
-        cw, ch = self.width(), self.height()
-        u = int(event.position().x() / cw * w_sp)
-        v = int(event.position().y() / ch * h_sp)
-        u = max(0, min(u, w_sp - 1))
-        v = max(0, min(v, h_sp - 1))
-        self.clicked_at.emit(u, v)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(BG))
+def _canvas_spatial(image):
+    return _to_gray(image)
 
-        if self._spectrum_pixmap is not None:
-            scaled = self._spectrum_pixmap.scaled(
-                self.width(), self.height(),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.FastTransformation
-            )
-            painter.drawPixmap(0, 0, scaled)
 
-        # crosshair
-        pen = QPen(QColor(BORDER))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        painter.drawLine(self.width() // 2, 0, self.width() // 2, self.height())
-        painter.drawLine(0, self.height() // 2, self.width(), self.height() // 2)
+def _canvas_magnitude(image):
+    from processing.frequency.spectrum import compute_spectrum, spectrum_to_display
+    gray = _to_gray(image)
+    shifted_fft, _, _ = compute_spectrum(gray)
+    return spectrum_to_display(shifted_fft)
 
-        # notch markers
-        if self._spectrum_shape[0] > 1:
-            h_sp, w_sp = self._spectrum_shape
-            cw, ch = self.width(), self.height()
-            for u, v in self._notches:
-                cx = int(u / w_sp * cw)
-                cy = int(v / h_sp * ch)
-                # solid red circle
-                painter.setPen(QPen(QColor(RED), 2))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawEllipse(cx - 6, cy - 6, 12, 12)
-                # dashed outer ring
-                pen2 = QPen(QColor(RED), 1, Qt.PenStyle.DashLine)
-                painter.setPen(pen2)
-                painter.drawEllipse(cx - 10, cy - 10, 20, 20)
 
-        painter.end()
+def _canvas_phase(image):
+    from processing.frequency.spectrum import compute_spectrum, phase_to_display
+    gray = _to_gray(image)
+    shifted_fft, _, _ = compute_spectrum(gray)
+    return phase_to_display(shifted_fft)
 
+
+def _freq_filter_fn(image, filter_type, cutoff=30.0, order=2,
+                    low_cutoff=10.0, high_cutoff=50.0):
+    from processing.frequency.spectrum import compute_spectrum, inverse_spectrum
+    from processing.frequency.filters import (
+        create_low_pass_filter, create_high_pass_filter,
+        create_band_pass_filter, create_band_reject_filter,
+        apply_frequency_filter,
+    )
+    if image.ndim == 3:
+        gray = (0.299 * image[:, :, 0] + 0.587 * image[:, :, 1]
+                + 0.114 * image[:, :, 2]).astype(np.uint8)
+    else:
+        gray = image
+    shape = gray.shape[:2]
+    shifted_fft, _, _ = compute_spectrum(gray)
+    center = (low_cutoff + high_cutoff) / 2.0
+    bandwidth = max(high_cutoff - low_cutoff, 1.0)
+    # filter_type format: '{shape}_{type}', e.g. 'ideal_lowpass', 'butterworth_bandreject'
+    shape_kind, ftype = filter_type.split('_', 1)
+    if ftype == 'lowpass':
+        mask = create_low_pass_filter(shape, cutoff, kind=shape_kind, order=order)
+    elif ftype == 'highpass':
+        mask = create_high_pass_filter(shape, cutoff, kind=shape_kind, order=order)
+    elif ftype == 'bandpass':
+        mask = create_band_pass_filter(shape, center, bandwidth, kind=shape_kind, order=order)
+    elif ftype == 'bandreject':
+        mask = create_band_reject_filter(shape, center, bandwidth, kind=shape_kind, order=order)
+    else:
+        raise ValueError(f"Unknown filter type: {filter_type!r}")
+    filtered = apply_frequency_filter(shifted_fft, mask)
+    return inverse_spectrum(filtered)
+
+
+def _notch_filter_fn(image, notch_centers, radius, filter_shape='ideal', order=2):
+    from processing.frequency.spectrum import compute_spectrum, inverse_spectrum
+    from processing.frequency.notch_filter import create_notch_filter, apply_notch_filter
+    gray = _to_gray(image)
+    shape = gray.shape[:2]
+    shifted_fft, _, _ = compute_spectrum(gray)
+    combined = create_notch_filter(shape, notch_centers, radius=radius,
+                                   filter_shape=filter_shape, order=order)
+    filtered = apply_notch_filter(shifted_fft, combined)
+    return inverse_spectrum(filtered)
+
+
+# ------------------------------------------------------------------
+# FourierPanel
+# ------------------------------------------------------------------
 
 class FourierPanel(QWidget):
-    notch_applied = pyqtSignal(str, np.ndarray)
+    fourier_applied = pyqtSignal(str, np.ndarray)
+    error_occurred  = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._notch_points: list = []
-        self._shifted_fft: np.ndarray | None = None
-        self._spectrum_shape: tuple = (1, 1)
+        self._state = None
+        self._worker: PipelineWorker | None = None
+        self._canvas_worker: PipelineWorker | None = None
+        self._current_image: np.ndarray | None = None
+        self._notch_centers: list[tuple[int, int]] = []
+        self._notch_spectrum_data: np.ndarray | None = None
+        self._notch_H: int = 0
+        self._notch_W: int = 0
+        self._build_ui()
 
-        self.setStyleSheet(f"background:{PANEL};")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+    def set_state(self, state):
+        self._state = state
 
-        hdr = QLabel("FREQUENCY / NOTCH FILTER")
-        hdr.setStyleSheet(HEADER_SS)
-        layout.addWidget(hdr)
+    # ------------------------------------------------------------------
+    # Public API (called by main_window)
+    # ------------------------------------------------------------------
 
-        # spectrum canvas
-        self._canvas = SpectrumCanvas()
-        self._canvas.clicked_at.connect(self._on_canvas_clicked)
-        layout.addWidget(self._canvas)
-
-        # notch count
-        self._notch_count_lbl = QLabel("0 notches placed")
-        self._notch_count_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;")
-        layout.addWidget(self._notch_count_lbl)
-
-        # filter shape
-        shape_lbl = QLabel("Filter shape")
-        shape_lbl.setStyleSheet(FIELD_SS)
-        layout.addWidget(shape_lbl)
-
-        shape_row = QWidget()
-        srl = QHBoxLayout(shape_row)
-        srl.setContentsMargins(0, 0, 0, 0)
-        srl.setSpacing(4)
-        self._shape_group = QButtonGroup(self)
-        for label in ("Ideal", "Butterworth", "Gaussian"):
-            rb = QRadioButton(label)
-            rb.setStyleSheet(f"color:{TEXT};font-size:9px;")
-            self._shape_group.addButton(rb)
-            srl.addWidget(rb)
-            if label == "Ideal":
-                rb.setChecked(True)
-        layout.addWidget(shape_row)
-
-        # radius + order
-        params_row = QWidget()
-        prl = QHBoxLayout(params_row)
-        prl.setContentsMargins(0, 0, 0, 0)
-        prl.setSpacing(8)
-
-        d0_lbl = QLabel("D₀")
-        d0_lbl.setStyleSheet(FIELD_SS)
-        prl.addWidget(d0_lbl)
-        self._radius_spin = QSpinBox()
-        self._radius_spin.setRange(1, 200)
-        self._radius_spin.setValue(10)
-        self._radius_spin.setFixedWidth(60)
-        self._radius_spin.setStyleSheet(SPINBOX_SS)
-        prl.addWidget(self._radius_spin)
-
-        self._order_lbl = QLabel("n")
-        self._order_lbl.setStyleSheet(FIELD_SS)
-        prl.addWidget(self._order_lbl)
-        self._order_spin = QSpinBox()
-        self._order_spin.setRange(1, 10)
-        self._order_spin.setValue(2)
-        self._order_spin.setFixedWidth(50)
-        self._order_spin.setEnabled(False)
-        self._order_spin.setStyleSheet(SPINBOX_SS)
-        prl.addWidget(self._order_spin)
-        prl.addStretch()
-        layout.addWidget(params_row)
-
-        self._shape_group.buttonClicked.connect(self._on_shape_changed)
-
-        # clear notches
-        clr_btn = QPushButton("Clear notches")
-        clr_btn.setStyleSheet(btn_style('ghost'))
-        clr_btn.clicked.connect(self._clear_notches)
-        layout.addWidget(clr_btn)
-
-        hint = QLabel("Click spectrum to place notch.\nAlt+click to remove nearest pair.")
-        hint.setStyleSheet(f"color:{MUTED2};font-size:9px;")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(hint)
-
-        # apply button
-        self.apply_btn = QPushButton("Apply Notch Filter")
-        self.apply_btn.setStyleSheet(APPLY_BTN_SS)
-        layout.addWidget(self.apply_btn)
-
-        layout.addStretch()
-
-    # ------------------------------------------------------------------ public
-
-    def set_image(self, image: np.ndarray):
+    def update_display(self, image: np.ndarray):
+        self._current_image = image
+        # Compute spectrum for notch canvas (display only)
         try:
-            validate_grayscale(image)
-            from processing.frequency.spectrum import compute_spectrum
-            self._shifted_fft, log_magnitude, _ = compute_spectrum(image)
-            self._spectrum_shape = log_magnitude.shape
-            self._canvas.set_spectrum(log_magnitude)
-            self._canvas.set_notches(self._notch_points)
+            from processing.frequency.spectrum import compute_spectrum, spectrum_to_display
+            gray = _to_gray(image)
+            shifted_fft, _, _ = compute_spectrum(gray)
+            self._notch_spectrum_data = spectrum_to_display(shifted_fft)
+            self._notch_H, self._notch_W = gray.shape[:2]
         except Exception:
-            self._shifted_fft = None
-            return
-
-    def on_apply_clicked(self):
-        if self._shifted_fft is None:
-            return
-        if not self._notch_points:
-            return
-        try:
-            from processing.frequency.notch_filter import create_notch_filter, apply_notch_filter
-            from processing.frequency.spectrum import inverse_spectrum
-
-            shape = self._shifted_fft.shape
-            checked = self._shape_group.checkedButton()
-            kind = checked.text().lower() if checked else "ideal"
-            radius = self._radius_spin.value()
-            order = self._order_spin.value()
-
-            combined = np.ones(shape, dtype=np.float64)
-            for u, v in self._notch_points:
-                mask = create_notch_filter(shape, u, v, radius, kind, order)
-                combined *= mask
-
-            filtered = apply_notch_filter(self._shifted_fft, combined)
-            result = inverse_spectrum(filtered)
-            result = normalize_to_uint8(result)
-            self.notch_applied.emit(f"Notch {kind.title()} D₀={radius}", result)
-        except ImportError:
-            # Phase 2 — frequency domain not implemented yet
-            # No dialog — user will see empty spectrum panel
             pass
-        except Exception as e:
-            show_error_dialog("Not Implemented", f"Notch filter is not yet available.\n{e}")
+        self._trigger_canvas_update()
+        self._redraw_notch_canvas()
 
-    # ------------------------------------------------------------------ private
+    def theme_changed(self, palette: dict):
+        self._update_canvas_theme(palette)
+        self._trigger_canvas_update()
+        self._redraw_notch_canvas()
 
-    def _on_canvas_clicked(self, u: int, v: int):
-        h, w = self._spectrum_shape
-        mirror_u = (h - u) % h
-        mirror_v = (w - v) % w
-        self._notch_points.append((u, v))
-        if (mirror_u, mirror_v) != (u, v):
-            self._notch_points.append((mirror_u, mirror_v))
-        self._canvas.set_notches(self._notch_points)
-        n_pairs = len(self._notch_points) // 2
-        self._notch_count_lbl.setText(f"{n_pairs} notch pair{'s' if n_pairs != 1 else ''} placed")
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
 
-    def _clear_notches(self):
-        self._notch_points.clear()
-        self._canvas.clear_notches()
-        self._notch_count_lbl.setText("0 notches placed")
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.addTab(self._build_spectrum_tab(), "SPECTRUM")
+        tabs.addTab(self._build_notch_tab(), "NOTCH")
+        tabs.addTab(self._build_freq_filters_tab(), "FREQ FILTERS")
+        layout.addWidget(tabs)
 
-    def _on_shape_changed(self, btn):
-        self._order_spin.setEnabled(btn.text() == "Butterworth")
+    def _lbl(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(FIELD_SS)
+        return lbl
+
+    def _header(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(HEADER_SS)
+        return lbl
+
+    # ---- SPECTRUM tab ----
+
+    def _build_spectrum_tab(self) -> QWidget:
+        p = _get_theme()
+        w = QWidget()
+        lyt = QVBoxLayout(w)
+        lyt.setContentsMargins(8, 8, 8, 8)
+        lyt.setSpacing(6)
+
+        tog_row = QHBoxLayout()
+        tog_row.setSpacing(4)
+
+        self._freq_btn = QPushButton("Spatial Domain")
+        self._freq_btn.setCheckable(True)
+        self._freq_btn.setChecked(False)
+        self._freq_btn.setStyleSheet(btn_style('default'))
+        self._freq_btn.clicked.connect(self._on_domain_toggled)
+        tog_row.addWidget(self._freq_btn)
+
+        self._phase_btn = QPushButton("Magnitude")
+        self._phase_btn.setCheckable(True)
+        self._phase_btn.setChecked(False)
+        self._phase_btn.setEnabled(False)
+        self._phase_btn.setStyleSheet(btn_style('default'))
+        self._phase_btn.clicked.connect(self._on_phase_toggled)
+        tog_row.addWidget(self._phase_btn)
+
+        lyt.addLayout(tog_row)
+
+        self._fig = Figure(figsize=(3, 2), dpi=80, facecolor=p['BG'],
+                           tight_layout=True)
+        self._ax = self._fig.add_subplot(111, facecolor=p['PANEL'])
+        self._canvas = FigureCanvas(self._fig)
+        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                   QSizePolicy.Policy.Expanding)
+        self._update_canvas_theme(p)
+        lyt.addWidget(self._canvas)
+        return w
+
+    # ---- NOTCH tab ----
+
+    def _build_notch_tab(self) -> QWidget:
+        p = _get_theme()
+        w = QWidget()
+        lyt = QVBoxLayout(w)
+        lyt.setContentsMargins(8, 8, 8, 8)
+        lyt.setSpacing(6)
+
+        lyt.addWidget(self._header("INTERACTIVE NOTCH"))
+
+        instr = QLabel("Click spectrum to add notch points (auto-symmetric)")
+        instr.setStyleSheet(FIELD_SS)
+        instr.setWordWrap(True)
+        lyt.addWidget(instr)
+
+        # Notch matplotlib canvas
+        self._notch_fig = Figure(figsize=(3, 3), dpi=80, facecolor=p['BG'],
+                                 tight_layout=True)
+        self._notch_ax = self._notch_fig.add_subplot(111, facecolor=p['PANEL'])
+        self._notch_ax.axis('off')
+        self._notch_canvas = FigureCanvas(self._notch_fig)
+        self._notch_canvas.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Expanding)
+        self._notch_canvas.mpl_connect('button_press_event', self._on_notch_click)
+        lyt.addWidget(self._notch_canvas)
+
+        self._points_lbl = QLabel("Points: 0")
+        self._points_lbl.setStyleSheet(FIELD_SS)
+        lyt.addWidget(self._points_lbl)
+
+        radius_row = QHBoxLayout()
+        radius_row.addWidget(self._lbl("RADIUS"))
+        self._radius_spin = QSpinBox()
+        self._radius_spin.setStyleSheet(SPINBOX_SS)
+        self._radius_spin.setRange(1, 50)
+        self._radius_spin.setValue(10)
+        radius_row.addWidget(self._radius_spin)
+        lyt.addLayout(radius_row)
+
+        lyt.addWidget(self._header("NOTCH SHAPE"))
+        self._notch_shape_group = QButtonGroup(self)
+        self._notch_shape_group.setExclusive(True)
+        notch_shape_row = QHBoxLayout()
+        notch_shape_row.setSpacing(4)
+        for i, (label, key) in enumerate([
+            ("IDEAL", "ideal"), ("GAUSSIAN", "gaussian"), ("BUTTERWORTH", "butterworth"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("notch_shape_key", key)
+            btn.setStyleSheet(btn_style('default'))
+            if i == 0:
+                btn.setChecked(True)
+            self._notch_shape_group.addButton(btn, i)
+            notch_shape_row.addWidget(btn)
+        self._notch_shape_group.idClicked.connect(self._on_notch_shape_changed)
+        lyt.addLayout(notch_shape_row)
+
+        self._notch_order_w = QWidget()
+        notch_order_lyt = QHBoxLayout(self._notch_order_w)
+        notch_order_lyt.setContentsMargins(0, 0, 0, 0)
+        notch_order_lyt.addWidget(self._lbl("ORDER"))
+        self._notch_order_spin = QSpinBox()
+        self._notch_order_spin.setStyleSheet(SPINBOX_SS)
+        self._notch_order_spin.setRange(1, 10)
+        self._notch_order_spin.setValue(2)
+        notch_order_lyt.addWidget(self._notch_order_spin)
+        self._notch_order_w.setVisible(False)
+        lyt.addWidget(self._notch_order_w)
+
+        clear_btn = QPushButton("CLEAR POINTS")
+        clear_btn.setStyleSheet(btn_style('default'))
+        clear_btn.clicked.connect(self._clear_notch_points)
+        lyt.addWidget(clear_btn)
+
+        self._notch_btn = QPushButton("APPLY NOTCH FILTER")
+        self._notch_btn.setStyleSheet(operation_btn_style())
+        self._notch_btn.clicked.connect(self._apply_notch)
+        lyt.addWidget(self._notch_btn)
+
+        return w
+
+    # ------------------------------------------------------------------
+    # Canvas helpers
+    # ------------------------------------------------------------------
+
+    def _update_canvas_theme(self, p: dict):
+        self._fig.set_facecolor(p['BG'])
+        self._ax.set_facecolor(p['PANEL'])
+        self._ax.tick_params(colors=p['MUTED'], labelsize=7)
+        for spine in self._ax.spines.values():
+            spine.set_color(p['BORDER'])
+        if hasattr(self, '_notch_fig'):
+            self._notch_fig.set_facecolor(p['BG'])
+            self._notch_ax.set_facecolor(p['PANEL'])
+            self._notch_ax.tick_params(colors=p['MUTED'], labelsize=7)
+            for spine in self._notch_ax.spines.values():
+                spine.set_color(p['BORDER'])
+
+    def _trigger_canvas_update(self):
+        if self._current_image is None:
+            return
+        if self._canvas_worker and self._canvas_worker.isRunning():
+            return
+
+        if self._freq_btn.isChecked():
+            fn = _canvas_phase if self._phase_btn.isChecked() else _canvas_magnitude
+        else:
+            fn = _canvas_spatial
+
+        state = _StaticState(self._current_image)
+        self._canvas_worker = PipelineWorker(fn, "_canvas", state)
+        self._canvas_worker.finished.connect(self._on_canvas_done)
+        self._canvas_worker.error.connect(self.error_occurred)
+        self._canvas_worker.start()
+
+    def _on_canvas_done(self, _op_name: str, result: np.ndarray):
+        p = _get_theme()
+        self._ax.cla()
+        self._ax.imshow(result, cmap='gray', aspect='auto',
+                        interpolation='nearest')
+        self._ax.axis('off')
+        self._ax.set_facecolor(p['PANEL'])
+        self._canvas.draw()
+
+    # ------------------------------------------------------------------
+    # Notch interactive canvas
+    # ------------------------------------------------------------------
+
+    def _redraw_notch_canvas(self):
+        if self._notch_spectrum_data is None:
+            return
+        p = _get_theme()
+        self._notch_ax.cla()
+        self._notch_fig.set_facecolor(p['BG'])
+        self._notch_ax.set_facecolor(p['PANEL'])
+        self._notch_ax.imshow(self._notch_spectrum_data, cmap='gray', aspect='auto')
+        self._notch_ax.axis('off')
+        for (r, c) in self._notch_centers:
+            self._notch_ax.plot(c, r, 'rx', markersize=8, markeredgewidth=2)
+        self._notch_canvas.draw()
+
+    def _on_notch_click(self, event):
+        if event.xdata is None or event.ydata is None:
+            return
+        if self._notch_spectrum_data is None:
+            return
+        H, W = self._notch_spectrum_data.shape[:2]
+        col = int(round(float(event.xdata)))
+        row = int(round(float(event.ydata)))
+        col = max(0, min(col, W - 1))
+        row = max(0, min(row, H - 1))
+        sym_row = H - 1 - row
+        sym_col = W - 1 - col
+        self._notch_centers.append((row, col))
+        if (sym_row, sym_col) != (row, col):
+            self._notch_centers.append((sym_row, sym_col))
+        self._points_lbl.setText(f"Points: {len(self._notch_centers)}")
+        self._redraw_notch_canvas()
+
+    def _clear_notch_points(self):
+        self._notch_centers.clear()
+        self._points_lbl.setText("Points: 0")
+        self._redraw_notch_canvas()
+
+    # ------------------------------------------------------------------
+    # Toggle handlers
+    # ------------------------------------------------------------------
+
+    def _on_domain_toggled(self, checked: bool):
+        self._freq_btn.setText("Frequency Domain" if checked else "Spatial Domain")
+        self._phase_btn.setEnabled(checked)
+        if not checked:
+            self._phase_btn.setChecked(False)
+            self._phase_btn.setText("Magnitude")
+        self._trigger_canvas_update()
+
+    def _on_phase_toggled(self, checked: bool):
+        self._phase_btn.setText("Phase" if checked else "Magnitude")
+        self._trigger_canvas_update()
+
+    # ------------------------------------------------------------------
+    # Apply operations
+    # ------------------------------------------------------------------
+
+    def _start_worker(self, fn, op_name: str, btn=None, btn_label=None, **kwargs):
+        if self._state is None:
+            return
+        if self._worker and self._worker.isRunning():
+            return
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("⟳ Processing...")
+        self._worker = PipelineWorker(fn, op_name, self._state, **kwargs)
+        self._worker.finished.connect(self.fourier_applied)
+        self._worker.error.connect(self.error_occurred)
+        if btn is not None:
+            orig = btn_label or op_name
+            self._worker.finished.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
+            self._worker.error.connect(lambda *_: (btn.setEnabled(True), btn.setText(orig)))
+        self._worker.start()
+
+    # ---- FREQ FILTERS tab ----
+
+    def _build_freq_filters_tab(self) -> QWidget:
+        w = QWidget()
+        lyt = QVBoxLayout(w)
+        lyt.setContentsMargins(8, 8, 8, 8)
+        lyt.setSpacing(6)
+
+        lyt.addWidget(self._header("FILTER TYPE"))
+        self._ff_type_group = QButtonGroup(self)
+        self._ff_type_group.setExclusive(True)
+        type_grid = QGridLayout()
+        type_grid.setSpacing(4)
+        for i, (label, key) in enumerate([
+            ("LOW PASS",    "lowpass"),
+            ("HIGH PASS",   "highpass"),
+            ("BAND PASS",   "bandpass"),
+            ("BAND REJECT", "bandreject"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("ff_key", key)
+            btn.setStyleSheet(btn_style('default'))
+            if i == 0:
+                btn.setChecked(True)
+            self._ff_type_group.addButton(btn, i)
+            type_grid.addWidget(btn, i // 2, i % 2)
+        self._ff_type_group.idClicked.connect(self._on_ff_type_changed)
+        lyt.addLayout(type_grid)
+
+        lyt.addWidget(self._header("SHAPE"))
+        self._ff_shape_group = QButtonGroup(self)
+        self._ff_shape_group.setExclusive(True)
+        shape_row = QHBoxLayout()
+        shape_row.setSpacing(4)
+        for i, (label, key) in enumerate([
+            ("IDEAL", "ideal"), ("GAUSSIAN", "gaussian"), ("BUTTERWORTH", "butterworth"),
+        ]):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setProperty("ff_shape_key", key)
+            btn.setStyleSheet(btn_style('default'))
+            if i == 0:
+                btn.setChecked(True)
+            self._ff_shape_group.addButton(btn, i)
+            shape_row.addWidget(btn)
+        self._ff_shape_group.idClicked.connect(self._on_ff_shape_changed)
+        lyt.addLayout(shape_row)
+
+        self._ff_order_w = QWidget()
+        ol = QHBoxLayout(self._ff_order_w)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.addWidget(self._lbl("ORDER"))
+        self._ff_order_spin = QSpinBox()
+        self._ff_order_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_order_spin.setRange(1, 10)
+        self._ff_order_spin.setValue(2)
+        ol.addWidget(self._ff_order_spin)
+        self._ff_order_w.setVisible(False)
+        lyt.addWidget(self._ff_order_w)
+
+        self._ff_cutoff_w = QWidget()
+        cl = QHBoxLayout(self._ff_cutoff_w)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.addWidget(self._lbl("CUTOFF"))
+        self._ff_cutoff_spin = QDoubleSpinBox()
+        self._ff_cutoff_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_cutoff_spin.setRange(1.0, 200.0)
+        self._ff_cutoff_spin.setValue(30.0)
+        cl.addWidget(self._ff_cutoff_spin)
+        lyt.addWidget(self._ff_cutoff_w)
+
+        self._ff_low_w = QWidget()
+        ll = QHBoxLayout(self._ff_low_w)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(self._lbl("LOW CUTOFF"))
+        self._ff_low_spin = QDoubleSpinBox()
+        self._ff_low_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_low_spin.setRange(1.0, 200.0)
+        self._ff_low_spin.setValue(10.0)
+        ll.addWidget(self._ff_low_spin)
+        self._ff_low_w.setVisible(False)
+        lyt.addWidget(self._ff_low_w)
+
+        self._ff_high_w = QWidget()
+        hl = QHBoxLayout(self._ff_high_w)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(self._lbl("HIGH CUTOFF"))
+        self._ff_high_spin = QDoubleSpinBox()
+        self._ff_high_spin.setStyleSheet(SPINBOX_SS)
+        self._ff_high_spin.setRange(1.0, 200.0)
+        self._ff_high_spin.setValue(50.0)
+        hl.addWidget(self._ff_high_spin)
+        self._ff_high_w.setVisible(False)
+        lyt.addWidget(self._ff_high_w)
+
+        self._filter_btn = QPushButton("APPLY FREQUENCY FILTER")
+        self._filter_btn.setStyleSheet(operation_btn_style())
+        self._filter_btn.clicked.connect(self._apply_freq_filter)
+        lyt.addWidget(self._filter_btn)
+
+        lyt.addStretch()
+        return w
+
+    def _on_ff_type_changed(self, _idx: int):
+        btn = self._ff_type_group.checkedButton()
+        key = btn.property("ff_key") if btn else "lowpass"
+        is_band = key in ("bandpass", "bandreject")
+        self._ff_cutoff_w.setVisible(not is_band)
+        self._ff_low_w.setVisible(is_band)
+        self._ff_high_w.setVisible(is_band)
+
+    def _on_ff_shape_changed(self, _idx: int):
+        btn = self._ff_shape_group.checkedButton()
+        key = btn.property("ff_shape_key") if btn else "ideal"
+        self._ff_order_w.setVisible(key == "butterworth")
+
+    def _on_notch_shape_changed(self, _idx: int):
+        btn = self._notch_shape_group.checkedButton()
+        key = btn.property("notch_shape_key") if btn else "ideal"
+        self._notch_order_w.setVisible(key == "butterworth")
+
+    def _apply_freq_filter(self):
+        type_btn  = self._ff_type_group.checkedButton()
+        shape_btn = self._ff_shape_group.checkedButton()
+        ftype  = type_btn.property("ff_key")       if type_btn  else "lowpass"
+        fshape = shape_btn.property("ff_shape_key") if shape_btn else "ideal"
+        filter_type = f"{fshape}_{ftype}"
+        self._start_worker(
+            _freq_filter_fn, f"Freq: {filter_type}",
+            btn=self._filter_btn, btn_label="APPLY FREQUENCY FILTER",
+            filter_type=filter_type,
+            cutoff=self._ff_cutoff_spin.value(),
+            order=self._ff_order_spin.value(),
+            low_cutoff=self._ff_low_spin.value(),
+            high_cutoff=self._ff_high_spin.value(),
+        )
+
+    def _apply_notch(self):
+        if not self._notch_centers:
+            return
+        shape_btn = self._notch_shape_group.checkedButton()
+        filter_shape = shape_btn.property("notch_shape_key") if shape_btn else "ideal"
+        self._start_worker(
+            _notch_filter_fn, "Notch Filter",
+            btn=self._notch_btn, btn_label="APPLY NOTCH FILTER",
+            notch_centers=list(self._notch_centers),
+            radius=self._radius_spin.value(),
+            filter_shape=filter_shape,
+            order=self._notch_order_spin.value(),
+        )
