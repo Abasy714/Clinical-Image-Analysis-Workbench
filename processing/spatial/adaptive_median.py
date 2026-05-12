@@ -6,14 +6,13 @@ as an impulse. Preserves edges better than a fixed-size median filter.
 
 import numpy as np
 from utils.error_handler import wrap_errors
-from utils.image_utils import validate_grayscale, normalize_to_uint8
+from utils.image_utils import validate_grayscale
 
 
 @wrap_errors
 def adaptive_median_filter(
     image: np.ndarray,
-    s_min: int = 3,
-    s_max: int = 7,
+    max_window: int = 7,
 ) -> np.ndarray:
     """
     Apply an adaptive median filter to a grayscale image from scratch.
@@ -22,37 +21,30 @@ def adaptive_median_filter(
     this filter grows the window when the median itself is detected as
     an impulse noise pixel — preserving more edge detail.
 
-    Two-stage algorithm per pixel:
-
-        Stage A — check if median is an impulse:
-            z_min = min of neighborhood
-            z_med = median of neighborhood
-            z_max = max of neighborhood
-            if z_min < z_med < z_max → median is clean → go to Stage B
-            else                     → window too small, grow and repeat A
-            if window exceeds s_max  → output z_med and stop
-
-        Stage B — check if center pixel is an impulse:
-            z_xy  = center pixel value
-            if z_min < z_xy < z_max → center pixel is clean → output z_xy
-            else                    → center pixel is impulse → output z_med
-
     Parameters
     ----------
-    image : 2D numpy array (H, W), grayscale
-    s_min : starting (minimum) window size — must be odd (default: 3)
-    s_max : maximum allowed window size — must be odd (default: 7)
+    image      : numpy array, grayscale or RGB (RGB converted to grayscale)
+    max_window : maximum allowed window size (default: 7, forced odd)
 
     Returns
     -------
-    output : 2D uint8 array (H, W), same size as input
+    output : 2D uint8 array (H, W)
     """
+    from utils.image_utils import to_grayscale
+    if image is None:
+        raise ValueError('adaptive_median: image is None')
+    if not isinstance(image, np.ndarray):
+        raise ValueError(f'adaptive_median: got {type(image)}, need ndarray')
+    if image.ndim == 3:
+        image = to_grayscale(image)
     validate_grayscale(image)
 
-    if s_min < 3 or s_min % 2 == 0:
-        raise ValueError(f"s_min must be an odd number >= 3, got {s_min}")
-    if s_max < s_min or s_max % 2 == 0:
-        raise ValueError(f"s_max must be an odd number >= s_min, got {s_max}")
+    if max_window % 2 == 0:
+        max_window += 1
+    if max_window < 3:
+        max_window = 3
+    s_min = 3
+    s_max = max_window
 
     image = image.astype(np.float64)
     img_h, img_w = image.shape
@@ -102,4 +94,4 @@ def adaptive_median_filter(
                         output[row, col] = z_med
                         break
 
-    return normalize_to_uint8(output)
+    return np.clip(output, 0, 255).astype(np.uint8)

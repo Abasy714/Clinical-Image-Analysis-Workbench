@@ -10,7 +10,6 @@ import numpy as np
 from utils.image_utils import validate_grayscale, normalize_to_uint8, to_grayscale
 from utils.error_handler import wrap_errors
 
-
 @wrap_errors
 def fourier_cross_correlate(image: np.ndarray, template: np.ndarray) -> np.ndarray:
     """
@@ -44,12 +43,10 @@ def fourier_cross_correlate(image: np.ndarray, template: np.ndarray) -> np.ndarr
 
     return corr
 
-
 @wrap_errors
 def find_best_match(correlation_map: np.ndarray) -> tuple:
     """Return (row, col) of the peak in the correlation map."""
     return np.unravel_index(np.argmax(correlation_map), correlation_map.shape)
-
 
 def _as_gray_float(image: np.ndarray, name: str) -> np.ndarray:
     if image is None or not isinstance(image, np.ndarray):
@@ -62,7 +59,6 @@ def _as_gray_float(image: np.ndarray, name: str) -> np.ndarray:
         raise ValueError(f"The {name} image is empty.")
     return gray
 
-
 def _window_sum(image: np.ndarray, height: int, width: int) -> np.ndarray:
     padded = np.pad(image, ((1, 0), (1, 0)), mode="constant")
     integral = padded.cumsum(axis=0).cumsum(axis=1)
@@ -72,7 +68,6 @@ def _window_sum(image: np.ndarray, height: int, width: int) -> np.ndarray:
         - integral[height:, :-width]
         + integral[:-height, :-width]
     )
-
 
 def normalized_cross_correlation(image: np.ndarray, template: np.ndarray) -> np.ndarray:
     """
@@ -118,7 +113,6 @@ def normalized_cross_correlation(image: np.ndarray, template: np.ndarray) -> np.
     ncc[valid] = numerator[valid] / denom[valid]
     return np.clip(ncc, -1.0, 1.0)
 
-
 def _rect_iou(a: tuple[int, int, int, int],
               b: tuple[int, int, int, int]) -> float:
     ar, ac, ah, aw = a
@@ -132,7 +126,6 @@ def _rect_iou(a: tuple[int, int, int, int],
         return 0.0
     union = ah * aw + bh * bw - inter
     return inter / max(union, 1)
-
 
 def find_template_matches(
     score_map: np.ndarray,
@@ -177,7 +170,6 @@ def find_template_matches(
             break
     return selected
 
-
 def draw_matches(image: np.ndarray, matches: list[dict]) -> np.ndarray:
     """Draw high-contrast rectangles around matches on a grayscale copy."""
     result = normalize_to_uint8(to_grayscale(image) if image.ndim == 3 else image).copy()
@@ -206,7 +198,6 @@ def draw_matches(image: np.ndarray, matches: list[dict]) -> np.ndarray:
         result[inner_r1, inner_c1:inner_c2] = 255
         result[inner_r2 - 1, inner_c1:inner_c2] = 255
     return result
-
 
 def match_template(
     image: np.ndarray,
