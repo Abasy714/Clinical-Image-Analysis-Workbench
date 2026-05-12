@@ -13,7 +13,6 @@ from .advanced import (
 from .pipeline_ops import (
     apply_morphology,
     binarize_for_morphology,
-    morphology_threshold,
 )
 
 __all__ = [
@@ -22,5 +21,5 @@ __all__ = [
     "opening", "closing",
     "extract_boundary", "extract_boundary_vectorized",
     "morphological_gradient", "white_top_hat", "black_top_hat", "apply_advanced_op",
-    "apply_morphology", "binarize_for_morphology", "morphology_threshold",
+    "apply_morphology", "binarize_for_morphology",
 ]
